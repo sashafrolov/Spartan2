@@ -1,0 +1,3 @@
+[submodule "scribe-system"]
+	path = scribe-system
+	url = https://github.com/Pratyush/scribe-system.git
