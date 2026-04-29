@@ -1,7 +1,7 @@
 // NeutronNova Freivalds editing. Fold a bunch of keyframe proofs together.
 //
 // Run with:
-//   RUST_LOG=neutron_nova_video_editing=info cargo run --example neutron_nova_video_editing --release
+//   RUST_LOG=neutron_nova_video_editing=info,spartan2::neutronnova_zk=info RUSTFLAGS="-C target-cpu=native" cargo run --example neutron_nova_video_editing --release
 // The RUST_LOG is because the Spartan library has a bunch of unnecessary print statements for large
 // circuits internally.
 
