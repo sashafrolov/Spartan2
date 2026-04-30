@@ -1,5 +1,5 @@
 //! examples/freivalds_conv_neutronnova.rs
-//! Benchmark FreivaldsConvCircuit folded across multiple step circuits using NeutronNova.
+//! Benchmark ExampleVideoEditCircuit folded across multiple step circuits using NeutronNova.
 //!
 //! Run with:
 //!   RUST_LOG=info cargo run --release --example freivalds_conv_neutronnova
@@ -38,7 +38,7 @@ fn generate_random_image(dimensions: (usize, usize)) -> Vec<Vec<u8>> {
 }
 
 #[derive(Clone, Debug)]
-struct FreivaldsConvCircuit<Scalar: PrimeField> {
+struct ExampleVideoEditCircuit<Scalar: PrimeField> {
   image: Vec<Vec<u8>>,
   edited_image: Vec<Vec<u8>>,
   r: Vec<Scalar>,
@@ -48,7 +48,7 @@ struct FreivaldsConvCircuit<Scalar: PrimeField> {
   _p: PhantomData<Scalar>,
 }
 
-impl<Scalar: PrimeField + PrimeFieldBits> FreivaldsConvCircuit<Scalar> {
+impl<Scalar: PrimeField + PrimeFieldBits> ExampleVideoEditCircuit<Scalar> {
   fn new(image: Vec<Vec<u8>>) -> Self {
     let height = image.len();
     assert!(height > 0);
@@ -75,7 +75,7 @@ impl<Scalar: PrimeField + PrimeFieldBits> FreivaldsConvCircuit<Scalar> {
   }
 }
 
-impl<E: Engine> SpartanCircuit<E> for FreivaldsConvCircuit<E::Scalar> {
+impl<E: Engine> SpartanCircuit<E> for ExampleVideoEditCircuit<E::Scalar> {
   fn public_values(&self) -> Result<Vec<E::Scalar>, SynthesisError> {
     let height = self.image.len();
     assert!(height > 0);
@@ -358,7 +358,7 @@ fn main() {
 
   // Dummy zero-image circuit used for shape/key derivation only.
   let shape_circuit =
-    FreivaldsConvCircuit::<<E as Engine>::Scalar>::new(vec![vec![0u8; IMAGE_WIDTH]; IMAGE_HEIGHT]);
+    ExampleVideoEditCircuit::<<E as Engine>::Scalar>::new(vec![vec![0u8; IMAGE_WIDTH]; IMAGE_HEIGHT]);
 
   let t0 = Instant::now();
   let (pk, vk) =
@@ -368,8 +368,8 @@ fn main() {
 
   // Build step circuits — each with a distinct random image.
   let t0 = Instant::now();
-  let step_circuits: Vec<FreivaldsConvCircuit<<E as Engine>::Scalar>> = (0..NUM_CIRCUITS)
-    .map(|_| FreivaldsConvCircuit::<<E as Engine>::Scalar>::new(generate_random_image(image_dims)))
+  let step_circuits: Vec<ExampleVideoEditCircuit<<E as Engine>::Scalar>> = (0..NUM_CIRCUITS)
+    .map(|_| ExampleVideoEditCircuit::<<E as Engine>::Scalar>::new(generate_random_image(image_dims)))
     .collect();
   info!(elapsed_ms = t0.elapsed().as_millis(), "generate_witness");
 
