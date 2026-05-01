@@ -1,7 +1,7 @@
-// Standalone example: fold many SHA-256 circuits into one proof using NeutronNova.
+// Standalone example: fold many SHA-256 circuits into one proof using streaming NeutronNova.
 //
 // Run with:
-//   RUST_LOG=info cargo run --example neutron_nova_sha256_example --release
+//   RUST_LOG=info RUSTFLAGS="-C target-cpu=native" cargo run --example neutron_nova_streaming_sha256_example --release
 //
 // Adjust NUM_CIRCUITS and PREIMAGE_LEN to experiment with different batch sizes / input lengths.
 
@@ -10,16 +10,12 @@ mod sha256_circuit;
 
 use sha256_circuit::Sha256Circuit;
 use spartan2::{
-  neutronnova_zk::NeutronNovaZkSNARK,
+  neutronnova_zk_streaming::NeutronNovaZkSNARK,
   provider::T256HyraxEngine,
 };
 use std::time::Instant;
 use tracing::{info, info_span};
 
-// Constants controlling the number of circuits to fold and the SHA-256
-// preimage length. This isn't a perfect example, since SHA-256 uses mostly
-// 0/1 wire values with low fan-in gates and is faster per-gate than handwritten
-// circuits.
 const NUM_CIRCUITS: usize = 32;
 const PREIMAGE_LEN: usize = 32 * 32;
 
@@ -41,7 +37,7 @@ fn main() {
   info!(
     num_circuits = NUM_CIRCUITS,
     preimage_len = PREIMAGE_LEN,
-    "starting NeutronNova benchmark"
+    "starting NeutronNova streaming benchmark"
   );
 
   // Use a dummy circuit of the right shape to derive the R1CS constraints and keys.

@@ -1,14 +1,12 @@
-// Copyright (c) Microsoft Corporation.
+// Adapted code from Microsoft's Spartan2 repository.
 // SPDX-License-Identifier: MIT
 // This file is part of the Spartan2 project.
 // See the LICENSE file in the project root for full license information.
 // Source repository: https://github.com/Microsoft/Spartan2
 
-//! This module implements NeutronNova's folding scheme for folding together a batch of R1CS instances
-//! This implementation focuses on a non-recursive version of NeutronNova and targets the case where the batch size is moderately large.
-//! Since we are in the non-recursive setting, we simply fold a batch of instances into one (all at once, via multi-folding)
-//! and then use Spartan to prove that folded instance.
-//! The proof system implemented here provides zero-knowledge via Nova's folding scheme.
+//! This implements a "Read/Write Streaming" version of the proof system in neutronnova_zk_streaming.rs.
+//! For ease of implementation (and because there were some bugs in the implementation at time of writing),
+//! this doesn't implement the "small value sumcheck" optimizations. 
 use crate::start_span;
 use crate::{
   Commitment, CommitmentKey, DEFAULT_COMMITMENT_WIDTH, VerifierKey,
@@ -22,8 +20,6 @@ use crate::{
   },
   big_num::{
     DelayedReduction,
-    montgomery::MontgomeryLimbs,
-    small_value::{SmallAccumulator, to_small_vec_or_zero},
   },
   digest::DigestComputer,
   errors::SpartanError,
@@ -177,312 +173,8 @@ where
     )
   }
 
-  /// AB-only variant of prove_helper: computes sum E[k]*Az_lo*Bz_lo (without Cz subtraction)
-  /// and the quad term sum E[k]*(Az_hi-Az_lo)*(Bz_hi-Bz_lo).
-  /// The caller subtracts the precomputed C_val contribution from e0_ab externally.
-  #[inline(always)]
-  #[allow(clippy::needless_range_loop)]
-  fn prove_helper_ab_only(
-    (left, right): (usize, usize),
-    e: &[E::Scalar],
-    Az1: &[E::Scalar],
-    Bz1: &[E::Scalar],
-    Az2: &[E::Scalar],
-    Bz2: &[E::Scalar],
-  ) -> (E::Scalar, E::Scalar) {
-    type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
-
-    let f = &e[left..];
-    let e_left = &e[..left];
-
-    let mut acc_e0_ab = Acc::<E::Scalar>::default();
-    let mut acc_quad = Acc::<E::Scalar>::default();
-
-    for i in 0..right {
-      let base = i * left;
-      let mut inner_e0 = Acc::<E::Scalar>::default();
-      let mut inner_quad = Acc::<E::Scalar>::default();
-
-      for j in 0..left {
-        let k = base + j;
-        let ab_val = Az1[k] * Bz1[k];
-        <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-          &mut inner_e0,
-          &e_left[j],
-          &ab_val,
-        );
-        let az_diff = Az2[k] - Az1[k];
-        let bz_diff = Bz2[k] - Bz1[k];
-        let quad_val = az_diff * bz_diff;
-        <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-          &mut inner_quad,
-          &e_left[j],
-          &quad_val,
-        );
-      }
-
-      let inner_e0_red = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_e0);
-      let inner_quad_red = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_quad);
-
-      let f_i = &f[i];
-      <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-        &mut acc_e0_ab,
-        f_i,
-        &inner_e0_red,
-      );
-      <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-        &mut acc_quad,
-        f_i,
-        &inner_quad_red,
-      );
-    }
-
-    (
-      <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_e0_ab),
-      <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_quad),
-    )
-  }
-
-  /// Small-value variant of prove_helper for round 0 (compute_e0=false).
-  ///
-  /// Uses integer arithmetic for the inner loop: i64 subtraction + i128 multiplication,
-  /// then `SmallAccumulator` for `field_mont * i128` accumulation.
-  /// Large-value positions (where Az/Bz didn't fit i64) are corrected with field arithmetic.
-  ///
-  /// Returns only quad_coeff (e0 is always zero for round 0).
-  #[inline(always)]
-  #[allow(clippy::needless_range_loop)]
-  fn prove_helper_small(
-    (left, right): (usize, usize),
-    e: &[E::Scalar],
-    Az1: &[E::Scalar],
-    Bz1: &[E::Scalar],
-    Az2: &[E::Scalar],
-    Bz2: &[E::Scalar],
-    Az1_i64: &[i64],
-    Bz1_i64: &[i64],
-    Az2_i64: &[i64],
-    Bz2_i64: &[i64],
-    large_positions: &[usize],
-  ) -> E::Scalar {
-    type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
-
-    let f = &e[left..];
-    let e_left = &e[..left];
-    let total = left * right;
-
-    let mut acc_quad = Acc::<E::Scalar>::default();
-
-    for i in 0..right {
-      let base = i * left;
-      let mut inner_acc = SmallAccumulator::zero();
-
-      for j in 0..left {
-        let k = base + j;
-        let az_diff = Az2_i64[k] as i128 - Az1_i64[k] as i128;
-        let bz_diff = Bz2_i64[k] as i128 - Bz1_i64[k] as i128;
-        let quad_val = az_diff * bz_diff;
-        inner_acc.accumulate(e_left[j].to_limbs(), quad_val);
-      }
-
-      let inner_quad_red = inner_acc.reduce::<E::Scalar>();
-      <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-        &mut acc_quad,
-        &f[i],
-        &inner_quad_red,
-      );
-    }
-
-    let mut quad = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_quad);
-
-    // Correction for large-value positions: add field arithmetic for positions
-    // where the i64 path contributed 0 instead of the correct value.
-    if !large_positions.is_empty() {
-      for &k in large_positions {
-        if k >= total {
-          continue;
-        }
-        let i = k / left;
-        let j = k % left;
-        let az_diff = Az2[k] - Az1[k];
-        let bz_diff = Bz2[k] - Bz1[k];
-        quad += f[i] * e_left[j] * az_diff * bz_diff;
-      }
-    }
-
-    quad
-  }
-
-  /// Small-value prove_helper for rounds 1+ using cross-product decomposition.
-  ///
-  /// Instead of working on folded field data, computes (e0_ab, quad) directly from
-  /// 4 original i64 layers per prove pair. The folded values are:
-  ///   Az_lo[k] = (1-r_0)*a_0[k] + r_0*a_1[k]
-  ///   Az_hi[k] = (1-r_0)*a_2[k] + r_0*a_3[k]
-  ///
-  /// The products decompose as cross-product sums with 3 weight classes:
-  ///   c_0_0 = (1-r_0)^2, c_0_1 = (1-r_0)*r_0, c_1_1 = r_0^2
-  #[inline(always)]
-  #[allow(clippy::needless_range_loop)]
-  fn prove_helper_ab_cross(
-    (left, right): (usize, usize),
-    e: &[E::Scalar],
-    a_i64: [&[i64]; 4],
-    b_i64: [&[i64]; 4],
-    a_field: [&[E::Scalar]; 4],
-    b_field: [&[E::Scalar]; 4],
-    c00: &E::Scalar,
-    c01: &E::Scalar,
-    c11: &E::Scalar,
-    r0: &E::Scalar,
-    large_positions: &[usize],
-  ) -> (E::Scalar, E::Scalar) {
-    type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
-
-    let f = &e[left..];
-    let e_left = &e[..left];
-    let total = left * right;
-
-    let mut acc_e0 = Acc::<E::Scalar>::default();
-    let mut acc_quad = Acc::<E::Scalar>::default();
-
-    for i in 0..right {
-      let base = i * left;
-
-      // Process e0 cross-product terms (Az_lo * Bz_lo)
-      let mut sa_e0_00 = SmallAccumulator::zero();
-      let mut sa_e0_01 = SmallAccumulator::zero();
-      let mut sa_e0_11 = SmallAccumulator::zero();
-
-      for j in 0..left {
-        let k = base + j;
-        let limbs = e_left[j].to_limbs();
-        let (a0, a1) = (a_i64[0][k] as i128, a_i64[1][k] as i128);
-        let (b0, b1) = (b_i64[0][k] as i128, b_i64[1][k] as i128);
-        sa_e0_00.accumulate(limbs, a0 * b0);
-        sa_e0_01.accumulate(limbs, a0 * b1 + a1 * b0);
-        sa_e0_11.accumulate(limbs, a1 * b1);
-      }
-
-      let e0_inner = *c00 * sa_e0_00.reduce::<E::Scalar>()
-        + *c01 * sa_e0_01.reduce::<E::Scalar>()
-        + *c11 * sa_e0_11.reduce::<E::Scalar>();
-      <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-        &mut acc_e0,
-        &f[i],
-        &e0_inner,
-      );
-
-      // Process quad cross-product terms ((Az_hi-Az_lo) * (Bz_hi-Bz_lo))
-      let mut sa_q_00 = SmallAccumulator::zero();
-      let mut sa_q_01 = SmallAccumulator::zero();
-      let mut sa_q_11 = SmallAccumulator::zero();
-
-      for j in 0..left {
-        let k = base + j;
-        let limbs = e_left[j].to_limbs();
-        let (da0, da1) = (
-          a_i64[2][k] as i128 - a_i64[0][k] as i128,
-          a_i64[3][k] as i128 - a_i64[1][k] as i128,
-        );
-        let (db0, db1) = (
-          b_i64[2][k] as i128 - b_i64[0][k] as i128,
-          b_i64[3][k] as i128 - b_i64[1][k] as i128,
-        );
-        sa_q_00.accumulate(limbs, da0 * db0);
-        sa_q_01.accumulate(limbs, da0 * db1 + da1 * db0);
-        sa_q_11.accumulate(limbs, da1 * db1);
-      }
-
-      let quad_inner = *c00 * sa_q_00.reduce::<E::Scalar>()
-        + *c01 * sa_q_01.reduce::<E::Scalar>()
-        + *c11 * sa_q_11.reduce::<E::Scalar>();
-      <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-        &mut acc_quad,
-        &f[i],
-        &quad_inner,
-      );
-    }
-
-    let mut e0 = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_e0);
-    let mut quad = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_quad);
-
-    // Correct for large-value positions
-    if !large_positions.is_empty() {
-      let one_minus_r0 = E::Scalar::ONE - *r0;
-      for &k in large_positions {
-        if k >= total {
-          continue;
-        }
-        let i = k / left;
-        let j = k % left;
-        let ej_fi = e_left[j] * f[i];
-
-        let az_lo = one_minus_r0 * a_field[0][k] + *r0 * a_field[1][k];
-        let az_hi = one_minus_r0 * a_field[2][k] + *r0 * a_field[3][k];
-        let bz_lo = one_minus_r0 * b_field[0][k] + *r0 * b_field[1][k];
-        let bz_hi = one_minus_r0 * b_field[2][k] + *r0 * b_field[3][k];
-
-        e0 += ej_fi * az_lo * bz_lo;
-        quad += ej_fi * (az_hi - az_lo) * (bz_hi - bz_lo);
-      }
-    }
-
-    (e0, quad)
-  }
-
-  /// Parallel fold of A/B layer chunks of size 4. Each chunk folds
-  /// indices [0,1] into [0] and indices [2,3] into [2] using `r_b`.
-  /// The resulting folded vectors are at positions 4j and 4j+2 after this call.
-  /// Use `compact_folded_layers` to move them to 2j and 2j+1.
-  fn par_fold_ab_chunks(a: &mut [Vec<E::Scalar>], b: &mut [Vec<E::Scalar>], r_b: E::Scalar) {
-    a.par_chunks_mut(4)
-      .zip(b.par_chunks_mut(4))
-      .for_each(|(a_chunk, b_chunk)| {
-        {
-          let (lo, hi) = a_chunk.split_at_mut(1);
-          lo[0]
-            .iter_mut()
-            .zip(hi[0].iter())
-            .for_each(|(l, h)| *l += r_b * (*h - *l));
-        }
-        {
-          let (lo, hi) = a_chunk.split_at_mut(3);
-          lo[2]
-            .iter_mut()
-            .zip(hi[0].iter())
-            .for_each(|(l, h)| *l += r_b * (*h - *l));
-        }
-        {
-          let (lo, hi) = b_chunk.split_at_mut(1);
-          lo[0]
-            .iter_mut()
-            .zip(hi[0].iter())
-            .for_each(|(l, h)| *l += r_b * (*h - *l));
-        }
-        {
-          let (lo, hi) = b_chunk.split_at_mut(3);
-          lo[2]
-            .iter_mut()
-            .zip(hi[0].iter())
-            .for_each(|(l, h)| *l += r_b * (*h - *l));
-        }
-      });
-  }
-
-  /// Compact folded results from positions [4j, 4j+2] (for j in 0..prove_pairs)
-  /// down to positions [2j, 2j+1]. Runs serially but only does O(prove_pairs)
-  /// swaps of `Vec` handles (pointer swaps, not data copies).
-  fn compact_folded_layers(a: &mut [Vec<E::Scalar>], b: &mut [Vec<E::Scalar>], prove_pairs: usize) {
-    for j in 0..prove_pairs {
-      a.swap(2 * j, 4 * j);
-      a.swap(2 * j + 1, 4 * j + 2);
-      b.swap(2 * j, 4 * j);
-      b.swap(2 * j + 1, 4 * j + 2);
-    }
-  }
-
-  /// Like `compact_folded_layers` but also handles C layers (for non-i64 path).
+  /// Like `compact_folded_layers_abc`: compact folded results from positions [4j, 4j+2]
+  /// down to [2j, 2j+1] for A, B, and C layers.
   fn compact_folded_layers_abc(
     a: &mut [Vec<E::Scalar>],
     b: &mut [Vec<E::Scalar>],
@@ -509,18 +201,16 @@ where
   /// - the final outer claim T_out for the step branch, and
   /// - the sequence of challenges r_b used to fold instances/witnesses.
   pub fn prove(
-    S: &SplitR1CSShape<E>,
-    ck: &CommitmentKey<E>,
-    Us: Vec<R1CSInstance<E>>,
-    Ws: Vec<R1CSWitness<E>>,
-    cached_matvec: Option<Vec<(Vec<E::Scalar>, Vec<E::Scalar>, Vec<E::Scalar>)>>,
-    cached_i64: Option<Vec<(Vec<i64>, Vec<i64>, Vec<i64>)>>,
-    large_positions: &[usize],
-    vc: &mut NeutronNovaVerifierCircuit<E>,
-    vc_state: &mut <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::MultiRoundState,
-    vc_shape: &SplitMultiRoundR1CSShape<E>,
-    vc_ck: &CommitmentKey<E>,
-    transcript: &mut E::TE,
+    S: &SplitR1CSShape<E>, // O(1)
+    ck: &CommitmentKey<E>, // O(1)
+    Us: Vec<R1CSInstance<E>>, // For this project, instances probably don't need to be FileVec'ed (check this).
+    Ws: Vec<R1CSWitness<E>>, // Needs to be file vec'ed? More likely that Az/Bz/Cz could be computed in one parallel pass.
+    cached_matvec: Option<Vec<(Vec<E::Scalar>, Vec<E::Scalar>, Vec<E::Scalar>)>>, // Likely needs to be FileVec'ed.
+    vc: &mut NeutronNovaVerifierCircuit<E>, // wrapper circuit.
+    vc_state: &mut <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::MultiRoundState, // wrapper circuit, fine
+    vc_shape: &SplitMultiRoundR1CSShape<E>, // wrapper circuit, fine
+    vc_ck: &CommitmentKey<E>, // wrapper circuit related, fine
+    transcript: &mut E::TE, // just a hash
   ) -> Result<
     (
       Vec<E::Scalar>,  // E_eq (split evals, length left+right)
@@ -594,103 +284,7 @@ where
       B_layers.push(b);
       C_layers.push(c);
     }
-    // Build i64 layers for small-value NIFS optimization
-    let n_i64_cached = cached_i64.as_ref().map_or(0, |c| c.len());
-    let mut A_i64_layers: Vec<Vec<i64>> = Vec::with_capacity(n_padded);
-    let mut B_i64_layers: Vec<Vec<i64>> = Vec::with_capacity(n_padded);
-    let mut C_i64_layers: Vec<Vec<i64>> = Vec::with_capacity(n_padded);
-    let has_i64 = cached_i64.is_some();
-    if let Some(cached) = cached_i64 {
-      for (a, b, c) in cached {
-        A_i64_layers.push(a);
-        B_i64_layers.push(b);
-        C_i64_layers.push(c);
-      }
-    }
-    // For padded instances, convert from field layers.
-    // Padded instances are clones of Us[0], so their large positions should be a subset
-    // of the global large_positions. We still zero at all global positions for safety.
-    for i in n_i64_cached..n_padded {
-      if has_i64 {
-        let (mut a_i64, a_large) = to_small_vec_or_zero(&A_layers[i]);
-        let (mut b_i64, b_large) = to_small_vec_or_zero(&B_layers[i]);
-        let (mut c_i64, c_large) = to_small_vec_or_zero(&C_layers[i]);
-        // Verify padded instance large positions are covered by global large_positions
-        debug_assert!(
-          a_large.iter().all(|p| large_positions.contains(p)),
-          "padded instance has large position not in global set"
-        );
-        debug_assert!(
-          b_large.iter().all(|p| large_positions.contains(p)),
-          "padded instance has large position not in global set"
-        );
-        debug_assert!(
-          c_large.iter().all(|p| large_positions.contains(p)),
-          "padded instance has large position not in global set"
-        );
-        // Zero at global large_positions to maintain the invariant
-        for &pos in large_positions {
-          a_i64[pos] = 0;
-          b_i64[pos] = 0;
-          c_i64[pos] = 0;
-        }
-        A_i64_layers.push(a_i64);
-        B_i64_layers.push(b_i64);
-        C_i64_layers.push(c_i64);
-      }
-    }
-
     // Execute NIFS rounds, generating cubic polynomials and driving r_b via multi-round state
-
-    // Precompute C_val[b] = sum_k E_eq[k] * Cz_b[k] for each instance b.
-    // This lets us skip C in fold_abc_pair and prove_helper, computing
-    // the C contribution to e0 as a weighted sum of these scalars instead.
-    // Uses two-level structure: E[k] = e_left[j] * f[i] where k = i*left + j.
-    let c_vals: Vec<E::Scalar> = if has_i64 {
-      let e_left = &E_eq[..left];
-      let f = &E_eq[left..];
-
-      let mut vals: Vec<E::Scalar> = (0..n_padded)
-        .into_par_iter()
-        .map(|b| {
-          let c_i64 = &C_i64_layers[b];
-          type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
-          let mut acc = Acc::<E::Scalar>::default();
-          #[allow(clippy::needless_range_loop)]
-          for i in 0..right {
-            let base = i * left;
-            let mut inner = SmallAccumulator::zero();
-            for j in 0..left {
-              inner.accumulate(e_left[j].to_limbs(), c_i64[base + j] as i128);
-            }
-            let inner_red = inner.reduce::<E::Scalar>();
-            <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-              &mut acc, &f[i], &inner_red,
-            );
-          }
-          <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc)
-        })
-        .collect();
-
-      // Correct for large positions where i64 was 0 instead of actual value
-      if !large_positions.is_empty() {
-        let total = left * right;
-        for &k in large_positions {
-          if k >= total {
-            continue;
-          }
-          let i = k / left;
-          let j = k % left;
-          let ej_fi = e_left[j] * f[i];
-          for b in 0..n_padded {
-            vals[b] += ej_fi * C_layers[b][k];
-          }
-        }
-      }
-      vals
-    } else {
-      vec![]
-    };
 
     let mut polys: Vec<UniPoly<E::Scalar>> = Vec::with_capacity(ell_b);
     let mut r_bs: Vec<E::Scalar> = Vec::with_capacity(ell_b);
@@ -734,9 +328,7 @@ where
       }};
     }
 
-    // Helper closure: fold one A/B pair from src indices to dest index.
-    // C layers are NOT folded -- C contribution is handled via precomputed c_vals when has_i64.
-    macro_rules! fold_ab_pair {
+    macro_rules! fold_abc_pair {
       ($src_even:expr, $src_odd:expr, $dest:expr, $r_b:expr) => {{
         {
           let even = std::mem::take(&mut A_layers[$src_even]);
@@ -756,13 +348,6 @@ where
           });
           B_layers[$dest] = folded;
         }
-      }};
-    }
-
-    // Full A/B/C fold for fallback (non-i64) path
-    macro_rules! fold_abc_pair {
-      ($src_even:expr, $src_odd:expr, $dest:expr, $r_b:expr) => {{
-        fold_ab_pair!($src_even, $src_odd, $dest, $r_b);
         {
           let even = std::mem::take(&mut C_layers[$src_even]);
           let odd = &C_layers[$src_odd];
@@ -775,95 +360,48 @@ where
       }};
     }
 
-    // Round 0: prove_helper (compute_e0 = false for round 0)
-    // Uses small-value integer arithmetic when i64 data is available.
+    // Round 0: prove_helper
     {
       let pairs = m / 2;
-      let (e0, quad_coeff) = if has_i64 {
-        // Small-value fast path: i64 subtraction + i128 multiplication
-        let quad_coeff = A_layers
-          .par_chunks(2)
-          .zip(B_layers.par_chunks(2))
-          .zip(A_i64_layers.par_chunks(2))
-          .zip(B_i64_layers.par_chunks(2))
-          .enumerate()
-          .map(|(pair_idx, (((pair_a, pair_b), pair_a_i64), pair_b_i64))| {
-            let qc = Self::prove_helper_small(
-              (left, right),
-              &E_eq,
-              &pair_a[0],
-              &pair_b[0],
-              &pair_a[1],
-              &pair_b[1],
-              &pair_a_i64[0],
-              &pair_b_i64[0],
-              &pair_a_i64[1],
-              &pair_b_i64[1],
-              large_positions,
-            );
-            let w = suffix_weight_full::<E::Scalar>(0, ell_b, pair_idx, &rhos);
-            qc * w
-          })
-          .reduce(|| E::Scalar::ZERO, |a, b| a + b);
-        (E::Scalar::ZERO, quad_coeff)
-      } else {
-        // Standard field arithmetic path
-        A_layers
-          .par_chunks(2)
-          .zip(B_layers.par_chunks(2))
-          .zip(C_layers.par_chunks(2))
-          .enumerate()
-          .map(|(pair_idx, ((pair_a, pair_b), pair_c))| {
-            let (e0, quad_coeff) = Self::prove_helper(
-              0,
-              (left, right),
-              &E_eq,
-              &pair_a[0],
-              &pair_b[0],
-              &pair_c[0],
-              &pair_a[1],
-              &pair_b[1],
-            );
-            let w = suffix_weight_full::<E::Scalar>(0, ell_b, pair_idx, &rhos);
-            (e0 * w, quad_coeff * w)
-          })
-          .reduce(
-            || (E::Scalar::ZERO, E::Scalar::ZERO),
-            |a, b| (a.0 + b.0, a.1 + b.1),
-          )
-      };
+      let (e0, quad_coeff) = A_layers
+        .par_chunks(2)
+        .zip(B_layers.par_chunks(2))
+        .zip(C_layers.par_chunks(2))
+        .enumerate()
+        .map(|(pair_idx, ((pair_a, pair_b), pair_c))| {
+          let (e0, quad_coeff) = Self::prove_helper(
+            0,
+            (left, right),
+            &E_eq,
+            &pair_a[0],
+            &pair_b[0],
+            &pair_c[0],
+            &pair_a[1],
+            &pair_b[1],
+          );
+          let w = suffix_weight_full::<E::Scalar>(0, ell_b, pair_idx, &rhos);
+          (e0 * w, quad_coeff * w)
+        })
+        .reduce(
+          || (E::Scalar::ZERO, E::Scalar::ZERO),
+          |a, b| (a.0 + b.0, a.1 + b.1),
+        );
       let r_b = finish_round!(0, e0, quad_coeff);
 
       if ell_b == 1 {
         for i in 0..pairs {
-          if has_i64 {
-            fold_ab_pair!(2 * i, 2 * i + 1, i, r_b);
-          } else {
-            fold_abc_pair!(2 * i, 2 * i + 1, i, r_b);
-          }
+          fold_abc_pair!(2 * i, 2 * i + 1, i, r_b);
         }
         A_layers.truncate(pairs);
         B_layers.truncate(pairs);
-        if !has_i64 {
-          C_layers.truncate(pairs);
-        }
+        C_layers.truncate(pairs);
         m = pairs;
       }
     }
 
     // Rounds 1..ell_b-1: merged fold(prev round) + prove_helper(current round)
-    // When has_i64: skip C folds, use prove_helper_ab_only, subtract precomputed c_vals.
     if ell_b > 1 {
       let mut prev_r_b = r_bs[0];
-
-      // Build prefix_coeffs incrementally: eq(v, (r_0, r_1, ...))
-      // After round 0, the first challenge r_0 gives prefix = [(1-r_0), r_0]
-      let mut prefix_coeffs: Vec<E::Scalar> = if has_i64 {
-        let r0 = r_bs[0];
-        vec![E::Scalar::ONE - r0, r0]
-      } else {
-        vec![]
-      };
 
       for t in 1..ell_b {
         let fold_pairs = m / 2;
@@ -871,172 +409,7 @@ where
         let mut e0_acc = E::Scalar::ZERO;
         let mut quad_acc = E::Scalar::ZERO;
 
-        if has_i64 {
-          let n_prefix = prefix_coeffs.len(); // 2^t
-
-          // Round 1 special case: use SA cross-product from i64 originals
-          if t == 1 {
-            let r0 = prev_r_b;
-            let one_minus_r0 = E::Scalar::ONE - r0;
-            let c00 = one_minus_r0 * one_minus_r0;
-            let c01 = one_minus_r0 * r0;
-            let c11 = r0 * r0;
-
-            // Parallel prove (read-only of A_layers / A_i64_layers etc.)
-            let prefix_coeffs_ref = &prefix_coeffs;
-            let c_vals_ref = &c_vals;
-            let e_eq_ref = &E_eq;
-            let rhos_ref = &rhos;
-            let a_layers_ref = &A_layers;
-            let b_layers_ref = &B_layers;
-            let a_i64_ref = &A_i64_layers;
-            let b_i64_ref = &B_i64_layers;
-            let (e0_sum, qc_sum) = (0..prove_pairs)
-              .into_par_iter()
-              .map(|j| {
-                let (e0_ab, qc) = Self::prove_helper_ab_cross(
-                  (left, right),
-                  e_eq_ref,
-                  [
-                    &a_i64_ref[4 * j],
-                    &a_i64_ref[4 * j + 1],
-                    &a_i64_ref[4 * j + 2],
-                    &a_i64_ref[4 * j + 3],
-                  ],
-                  [
-                    &b_i64_ref[4 * j],
-                    &b_i64_ref[4 * j + 1],
-                    &b_i64_ref[4 * j + 2],
-                    &b_i64_ref[4 * j + 3],
-                  ],
-                  [
-                    &a_layers_ref[4 * j],
-                    &a_layers_ref[4 * j + 1],
-                    &a_layers_ref[4 * j + 2],
-                    &a_layers_ref[4 * j + 3],
-                  ],
-                  [
-                    &b_layers_ref[4 * j],
-                    &b_layers_ref[4 * j + 1],
-                    &b_layers_ref[4 * j + 2],
-                    &b_layers_ref[4 * j + 3],
-                  ],
-                  &c00,
-                  &c01,
-                  &c11,
-                  &r0,
-                  large_positions,
-                );
-                let lo_base = (2 * j) * n_prefix;
-                let mut c_val_lo = E::Scalar::ZERO;
-                for v in 0..n_prefix {
-                  c_val_lo += prefix_coeffs_ref[v] * c_vals_ref[lo_base + v];
-                }
-                let e0 = e0_ab - c_val_lo;
-                let w = suffix_weight_full::<E::Scalar>(t, ell_b, j, rhos_ref);
-                (e0 * w, qc * w)
-              })
-              .reduce(
-                || (E::Scalar::ZERO, E::Scalar::ZERO),
-                |a, b| (a.0 + b.0, a.1 + b.1),
-              );
-            e0_acc += e0_sum;
-            quad_acc += qc_sum;
-
-            // Parallel fold of all prove_pairs chunks (field arithmetic)
-            if prove_pairs > 0 {
-              Self::par_fold_ab_chunks(
-                &mut A_layers[..4 * prove_pairs],
-                &mut B_layers[..4 * prove_pairs],
-                prev_r_b,
-              );
-              // Compact folded results from positions [4j, 4j+2] into [2j, 2j+1]
-              Self::compact_folded_layers(&mut A_layers, &mut B_layers, prove_pairs);
-            }
-            // Tail fold (for odd fold_pairs / non-power-of-two cases)
-            for i in (2 * prove_pairs)..fold_pairs {
-              fold_ab_pair!(2 * i, 2 * i + 1, i, prev_r_b);
-            }
-          } else {
-            // Rounds 2+: merged parallel fold + prove from field data
-            let prefix_coeffs_ref = &prefix_coeffs;
-            let c_vals_ref = &c_vals;
-            let e_eq_ref = &E_eq;
-            let rhos_ref = &rhos;
-
-            let (a_head, _) = A_layers.split_at_mut(4 * prove_pairs);
-            let (b_head, _) = B_layers.split_at_mut(4 * prove_pairs);
-
-            let (e0_sum, qc_sum) = a_head
-              .par_chunks_mut(4)
-              .zip(b_head.par_chunks_mut(4))
-              .enumerate()
-              .map(|(j, (a_chunk, b_chunk))| {
-                // Fold a_chunk[0] += r * (a_chunk[1] - a_chunk[0])
-                {
-                  let (lo, hi) = a_chunk.split_at_mut(1);
-                  lo[0]
-                    .iter_mut()
-                    .zip(hi[0].iter())
-                    .for_each(|(l, h)| *l += prev_r_b * (*h - *l));
-                }
-                // Fold a_chunk[2] += r * (a_chunk[3] - a_chunk[2])
-                {
-                  let (lo, hi) = a_chunk.split_at_mut(3);
-                  lo[2]
-                    .iter_mut()
-                    .zip(hi[0].iter())
-                    .for_each(|(l, h)| *l += prev_r_b * (*h - *l));
-                }
-                // Fold b_chunk[0] and b_chunk[2] similarly
-                {
-                  let (lo, hi) = b_chunk.split_at_mut(1);
-                  lo[0]
-                    .iter_mut()
-                    .zip(hi[0].iter())
-                    .for_each(|(l, h)| *l += prev_r_b * (*h - *l));
-                }
-                {
-                  let (lo, hi) = b_chunk.split_at_mut(3);
-                  lo[2]
-                    .iter_mut()
-                    .zip(hi[0].iter())
-                    .for_each(|(l, h)| *l += prev_r_b * (*h - *l));
-                }
-                // Prove from folded positions [0] and [2]
-                let (e0_ab, qc) = Self::prove_helper_ab_only(
-                  (left, right),
-                  e_eq_ref,
-                  &a_chunk[0],
-                  &b_chunk[0],
-                  &a_chunk[2],
-                  &b_chunk[2],
-                );
-                let lo_base = (2 * j) * n_prefix;
-                let mut c_val_lo = E::Scalar::ZERO;
-                for v in 0..n_prefix {
-                  c_val_lo += prefix_coeffs_ref[v] * c_vals_ref[lo_base + v];
-                }
-                let e0 = e0_ab - c_val_lo;
-                let w = suffix_weight_full::<E::Scalar>(t, ell_b, j, rhos_ref);
-                (e0 * w, qc * w)
-              })
-              .reduce(
-                || (E::Scalar::ZERO, E::Scalar::ZERO),
-                |a, b| (a.0 + b.0, a.1 + b.1),
-              );
-            e0_acc += e0_sum;
-            quad_acc += qc_sum;
-
-            // Compact folded results from positions [4j, 4j+2] into [2j, 2j+1]
-            Self::compact_folded_layers(&mut A_layers, &mut B_layers, prove_pairs);
-
-            for i in (2 * prove_pairs)..fold_pairs {
-              fold_ab_pair!(2 * i, 2 * i + 1, i, prev_r_b);
-            }
-          }
-        } else {
-          // Parallel merged fold + prove for the non-i64 path (mirrors the i64 structure above).
+        {
           let e_eq_ref = &E_eq;
           let rhos_ref = &rhos;
 
@@ -1098,110 +471,19 @@ where
 
         A_layers.truncate(fold_pairs);
         B_layers.truncate(fold_pairs);
-        if !has_i64 {
-          C_layers.truncate(fold_pairs);
-        }
+        C_layers.truncate(fold_pairs);
         m = fold_pairs;
         prev_r_b = finish_round!(t, e0_acc, quad_acc);
-
-        // Extend prefix_coeffs: each c splits into c*(1-r_t) and c*r_t
-        if has_i64 {
-          let r_t = prev_r_b;
-          let one_minus_r_t = E::Scalar::ONE - r_t;
-          let old = std::mem::take(&mut prefix_coeffs);
-          prefix_coeffs = Vec::with_capacity(old.len() * 2);
-          // Concatenate: first old*(1-r_t), then old*r_t.
-          // This matches the fold structure where bit t occupies the UPPER half
-          // of each group: v = v_old + n_old * b_t.
-          for c in &old {
-            prefix_coeffs.push(*c * one_minus_r_t);
-          }
-          for c in &old {
-            prefix_coeffs.push(*c * r_t);
-          }
-        }
       }
 
-      // Final fold: fold remaining A/B layers
+      // Final fold: fold remaining A/B/C layers
       let final_pairs = m / 2;
-      if has_i64 && final_pairs > 0 {
-        // Parallel fold over pairs (2*final_pairs elements → final_pairs elements)
-        A_layers[..2 * final_pairs]
-          .par_chunks_mut(2)
-          .zip(B_layers[..2 * final_pairs].par_chunks_mut(2))
-          .for_each(|(a_chunk, b_chunk)| {
-            {
-              let (lo, hi) = a_chunk.split_at_mut(1);
-              lo[0]
-                .iter_mut()
-                .zip(hi[0].iter())
-                .for_each(|(l, h)| *l += prev_r_b * (*h - *l));
-            }
-            {
-              let (lo, hi) = b_chunk.split_at_mut(1);
-              lo[0]
-                .iter_mut()
-                .zip(hi[0].iter())
-                .for_each(|(l, h)| *l += prev_r_b * (*h - *l));
-            }
-          });
-        // After parallel fold, folded results are at positions 2i (i in 0..final_pairs).
-        // Compact to positions [0..final_pairs].
-        for i in 0..final_pairs {
-          A_layers.swap(i, 2 * i);
-          B_layers.swap(i, 2 * i);
-        }
-      } else {
-        for i in 0..final_pairs {
-          if has_i64 {
-            fold_ab_pair!(2 * i, 2 * i + 1, i, prev_r_b);
-          } else {
-            fold_abc_pair!(2 * i, 2 * i + 1, i, prev_r_b);
-          }
-        }
+      for i in 0..final_pairs {
+        fold_abc_pair!(2 * i, 2 * i + 1, i, prev_r_b);
       }
       A_layers.truncate(final_pairs);
       B_layers.truncate(final_pairs);
-      if !has_i64 {
-        C_layers.truncate(final_pairs);
-      }
-    }
-
-    // Compute final Cz_step from original C_i64 layers using SmallAccumulator
-    if has_i64 {
-      let final_weights = weights_from_r::<E::Scalar>(&r_bs, n_padded);
-      let total = left * right;
-
-      // Precompute weight limbs to avoid repeated to_limbs() calls
-      let weight_limbs: Vec<&[u64; 4]> = final_weights.iter().map(|w| w.to_limbs()).collect();
-
-      // Parallel across k: for each k, accumulate across all b serially.
-      let mut cz_step: Vec<E::Scalar> = (0..total)
-        .into_par_iter()
-        .map(|k| {
-          let mut sa = SmallAccumulator::zero();
-          for b in 0..n_padded {
-            sa.accumulate(weight_limbs[b], C_i64_layers[b][k] as i128);
-          }
-          sa.reduce::<E::Scalar>()
-        })
-        .collect();
-
-      // Correct large positions with field arithmetic
-      if !large_positions.is_empty() {
-        for &k in large_positions {
-          if k >= total {
-            continue;
-          }
-          let mut val = E::Scalar::ZERO;
-          for b in 0..n_padded {
-            val += final_weights[b] * C_layers[b][k];
-          }
-          cz_step[k] = val;
-        }
-      }
-
-      C_layers = vec![cz_step];
+      C_layers.truncate(final_pairs);
     }
     // T_out = poly_last(r_last) / eq(r_b, rho)
     let acc_eq_inv: Option<E::Scalar> = acc_eq.invert().into();
@@ -1356,17 +638,6 @@ impl<E: Engine> DigestHelperTrait<E> for NeutronNovaVerifierKey<E> {
 pub struct NeutronNovaPrepZkSNARK<E: Engine> {
   ps_step: Vec<PrecommittedState<E>>,
   ps_core: PrecommittedState<E>,
-  /// Cached partial matrix-vector products for shared+precommitted columns per step circuit (deterministic).
-  cached_step_matvec: Option<Vec<(Vec<E::Scalar>, Vec<E::Scalar>, Vec<E::Scalar>)>>,
-  /// Small-value (i64) cache of Az/Bz/Cz for NIFS integer arithmetic.
-  /// Large values are stored as 0 and corrected via field arithmetic using `large_positions`.
-  cached_step_i64: Option<Vec<(Vec<i64>, Vec<i64>, Vec<i64>)>>,
-  /// Positions where ANY instance's Az/Bz/Cz didn't fit i64 (union across all instances).
-  /// i64 vectors are zeroed at these positions; correction uses field values.
-  large_positions: Vec<usize>,
-  /// Public values used when computing cached_step_matvec, for validation in prove.
-  /// Non-empty when the matvec cache is active; prove checks that step circuits produce the same values.
-  cached_step_public_values: Vec<Vec<E::Scalar>>,
 }
 
 /// Holds the proof produced by the NeutronNova folding scheme followed by NeutronNova SNARK
@@ -1518,87 +789,10 @@ where
     )?;
     info!(elapsed_ms = %precommit_t.elapsed().as_millis(), circuits = step_circuits.len() + 1, "generate_precommitted_witnesses");
 
-    // Precompute full matrix-vector products for step circuits (deterministic).
-    // Only valid when step circuits have no rest variables and no challenges,
-    // meaning z = [shared_W, precommitted_W, 0..., 1, public_values] is fully known during prep.
-    let can_cache_matvec = pk.S_step.num_challenges == 0 && pk.S_step.num_rest_unpadded == 0;
-
-    let (cached_step_matvec, cached_step_i64, large_positions, cached_step_public_values) =
-      if can_cache_matvec {
-        // Collect public values for each step circuit so we can validate in prove
-        let step_public_values: Vec<Vec<E::Scalar>> = step_circuits
-          .iter()
-          .map(|c| {
-            c.public_values().map_err(|e| SpartanError::SynthesisError {
-              reason: format!("Circuit does not provide public IO: {e}"),
-            })
-          })
-          .collect::<Result<Vec<_>, _>>()?;
-
-        let matvec: Vec<_> = (0..ps_step.len())
-          .into_par_iter()
-          .map(|i| {
-            let ps_i = &ps_step[i];
-            let public_values = &step_public_values[i];
-            let mut z = Vec::with_capacity(ps_i.W.len() + 1 + public_values.len());
-            z.extend_from_slice(&ps_i.W);
-            z.push(E::Scalar::ONE);
-            z.extend_from_slice(public_values);
-            pk.S_step.multiply_vec(&z)
-          })
-          .collect::<Result<Vec<_>, _>>()?;
-        // Convert Az/Bz to i64 for small-value NIFS round 0 optimization.
-        let mut all_i64 = Vec::with_capacity(matvec.len());
-        let mut large_pos_set = std::collections::BTreeSet::new();
-        for (az, bz, cz) in &matvec {
-          let (az_i64, az_large) = to_small_vec_or_zero(az);
-          let (bz_i64, bz_large) = to_small_vec_or_zero(bz);
-          let (cz_i64, cz_large) = to_small_vec_or_zero(cz);
-          for pos in az_large {
-            large_pos_set.insert(pos);
-          }
-          for pos in bz_large {
-            large_pos_set.insert(pos);
-          }
-          for pos in cz_large {
-            large_pos_set.insert(pos);
-          }
-          all_i64.push((az_i64, bz_i64, cz_i64));
-        }
-        let lp: Vec<usize> = large_pos_set.into_iter().collect();
-        info!(
-          n_large = lp.len(),
-          total = matvec[0].0.len(),
-          "i64_conversion_stats"
-        );
-
-        // Zero out i64 values at ALL large_positions in ALL instances.
-        if !lp.is_empty() {
-          for (az_i64, bz_i64, cz_i64) in &mut all_i64 {
-            for &pos in &lp {
-              az_i64[pos] = 0;
-              bz_i64[pos] = 0;
-              cz_i64[pos] = 0;
-            }
-          }
-        }
-        (Some(matvec), Some(all_i64), lp, step_public_values)
-      } else {
-        info!(
-          "Step circuit has rest_unpadded={} challenges={}, skipping matvec/i64 caching",
-          pk.S_step.num_rest_unpadded, pk.S_step.num_challenges
-        );
-        (None, None, Vec::new(), Vec::new())
-      };
-
     info!(elapsed_ms = %prep_t.elapsed().as_millis(), "neutronnova_prep_prove");
     Ok(NeutronNovaPrepZkSNARK {
       ps_step,
       ps_core: ps,
-      cached_step_matvec,
-      cached_step_i64,
-      large_positions,
-      cached_step_public_values,
     })
   }
 
@@ -1626,33 +820,6 @@ where
       ps_i.rerandomize_with_shared_in_place(&pk.ck, &pk.S_step, &comm_W_shared, &r_W_shared)
     })?;
     info!(elapsed_ms = %rerandomize_t.elapsed().as_millis(), "rerandomize_prep_state");
-
-    // Validate that cached matvec matches current step circuit public values.
-    // The cache computed in prep_prove includes public_values in the z vector;
-    // if the circuits changed, the cache is stale and would produce incorrect proofs.
-    if !prep_snark.cached_step_public_values.is_empty() {
-      if prep_snark.cached_step_public_values.len() != step_circuits.len() {
-        return Err(SpartanError::InternalError {
-          reason: format!(
-            "Cached matvec was computed for {} step circuits, but prove received {}",
-            prep_snark.cached_step_public_values.len(),
-            step_circuits.len()
-          ),
-        });
-      }
-      for (i, circuit) in step_circuits.iter().enumerate() {
-        let current_pv = circuit
-          .public_values()
-          .map_err(|e| SpartanError::SynthesisError {
-            reason: format!("Circuit does not provide public IO: {e}"),
-          })?;
-        if prep_snark.cached_step_public_values[i] != current_pv {
-          return Err(SpartanError::InternalError {
-            reason: format!("Step circuit {i} public values changed between prep_prove and prove"),
-          });
-        }
-      }
-    }
 
     // Parallel generation of instances and witnesses
     let (_gen_span, gen_t) = start_span!(
@@ -1751,30 +918,13 @@ where
     );
     let mut vc_state = SatisfyingAssignment::<E>::initialize_multiround_witness(&pk.vc_shape)?;
 
-    // Perform ZK NIFS prove and collect outputs.
-    // Clone caches (matvec/i64) before passing to NIFS, which consumes them.
-    // This keeps `prep_snark.cached_step_matvec` / `cached_step_i64` populated
-    // so that a subsequent `prove` call on the same prep state reuses them
-    // (production reuse scenario). large_positions is also kept intact via `&`.
     let (_nifs_span, nifs_t) = start_span!("NIFS");
-    // Parallel clone: each inner triple (Vec, Vec, Vec) of size num_cons is
-    // large enough that serial clone becomes a bottleneck at many instances.
-    let cached_matvec = prep_snark
-      .cached_step_matvec
-      .as_ref()
-      .map(|v| v.par_iter().cloned().collect::<Vec<_>>());
-    let cached_i64 = prep_snark
-      .cached_step_i64
-      .as_ref()
-      .map(|v| v.par_iter().cloned().collect::<Vec<_>>());
     let (E_eq, Az_step, Bz_step, Cz_step, folded_W, folded_U) = NeutronNovaNIFS::<E>::prove(
       &pk.S_step,
       &pk.ck,
       step_instances_regular,
       step_witnesses,
-      cached_matvec,
-      cached_i64,
-      &prep_snark.large_positions,
+      None,
       &mut vc,
       &mut vc_state,
       &pk.vc_shape,
