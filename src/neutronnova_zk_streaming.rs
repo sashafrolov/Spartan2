@@ -12,7 +12,7 @@ use crate::{
   Commitment, CommitmentKey, DEFAULT_COMMITMENT_WIDTH, VerifierKey,
   bellpepper::{
     r1cs::{
-      MultiRoundSpartanShape, MultiRoundSpartanWitness, PrecommittedState, SpartanShape,
+      MultiRoundSpartanShape, MultiRoundSpartanWitness, SpartanShape,
       SpartanWitness,
     },
     shape_cs::ShapeCS,
@@ -201,12 +201,14 @@ where
   /// - the final outer claim T_out for the step branch, and
   /// - the sequence of challenges r_b used to fold instances/witnesses.
   pub fn prove(
-    S: &SplitR1CSShape<E>, // O(1)
-    ck: &CommitmentKey<E>, // O(1)
-    Us: Vec<R1CSInstance<E>>, // For this project, instances probably don't need to be FileVec'ed (check this).
-    Ws: Vec<R1CSWitness<E>>, // Needs to be file vec'ed? More likely that Az/Bz/Cz could be computed in one parallel pass.
-    cached_matvec: Option<Vec<(Vec<E::Scalar>, Vec<E::Scalar>, Vec<E::Scalar>)>>, // Likely needs to be FileVec'ed.
-    vc: &mut NeutronNovaVerifierCircuit<E>, // wrapper circuit.
+    S: &SplitR1CSShape<E>,
+    ck: &CommitmentKey<E>,
+    Us: Vec<R1CSInstance<E>>,
+    Ws: Vec<R1CSWitness<E>>,
+    mut A_layers: Vec<Vec<E::Scalar>>,
+    mut B_layers: Vec<Vec<E::Scalar>>,
+    mut C_layers: Vec<Vec<E::Scalar>>,
+    vc: &mut NeutronNovaVerifierCircuit<E>,
     vc_state: &mut <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::MultiRoundState, // wrapper circuit, fine
     vc_shape: &SplitMultiRoundR1CSShape<E>, // wrapper circuit, fine
     vc_ck: &CommitmentKey<E>, // wrapper circuit related, fine
@@ -256,34 +258,6 @@ where
       rhos.push(transcript.squeeze(b"rho")?);
     }
 
-    // Build Az, Bz, Cz tables for each (possibly padded) instance
-
-    // Split cached matvec: consume owned triples for cached instances, compute rest
-    let mut A_layers: Vec<Vec<E::Scalar>> = Vec::with_capacity(n_padded);
-    let mut B_layers: Vec<Vec<E::Scalar>> = Vec::with_capacity(n_padded);
-    let mut C_layers: Vec<Vec<E::Scalar>> = Vec::with_capacity(n_padded);
-
-    let n_cached = cached_matvec.as_ref().map_or(0, |c| c.len());
-    if let Some(cached) = cached_matvec {
-      for (a, b, c) in cached {
-        A_layers.push(a);
-        B_layers.push(b);
-        C_layers.push(c);
-      }
-    }
-    // Compute matvec for any remaining (padded) instances
-    for i in n_cached..n_padded {
-      let w = &Ws[i].W;
-      let x = &Us[i].X;
-      let mut z = Vec::with_capacity(w.len() + 1 + x.len());
-      z.extend_from_slice(w);
-      z.push(E::Scalar::ONE);
-      z.extend_from_slice(x);
-      let (a, b, c) = S.multiply_vec(&z)?;
-      A_layers.push(a);
-      B_layers.push(b);
-      C_layers.push(c);
-    }
     // Execute NIFS rounds, generating cubic polynomials and driving r_b via multi-round state
 
     let mut polys: Vec<UniPoly<E::Scalar>> = Vec::with_capacity(ell_b);
@@ -632,14 +606,6 @@ impl<E: Engine> DigestHelperTrait<E> for NeutronNovaVerifierKey<E> {
   }
 }
 
-/// A type that holds the pre-processed state for proving
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(bound = "")]
-pub struct NeutronNovaPrepZkSNARK<E: Engine> {
-  ps_step: Vec<PrecommittedState<E>>,
-  ps_core: PrecommittedState<E>,
-}
-
 /// Holds the proof produced by the NeutronNova folding scheme followed by NeutronNova SNARK
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
@@ -744,167 +710,39 @@ where
     Ok((pk, vk))
   }
 
-  /// Prepares the pre-processed state for proving
-  pub fn prep_prove<C1: SpartanCircuit<E>, C2: SpartanCircuit<E>>(
+  /// Proves the folding of a batch of R1CS instances and a core circuit that connects them together.
+  pub fn prove<C1: SpartanCircuit<E>, C2: SpartanCircuit<E>>(
     pk: &NeutronNovaProverKey<E>,
     step_circuits: &[C1],
     core_circuit: &C2,
-    is_small: bool, // do witness elements fit in machine words?
-  ) -> Result<NeutronNovaPrepZkSNARK<E>, SpartanError> {
-    let (_prep_span, prep_t) = start_span!("neutronnova_prep_prove");
+    is_small: bool,
+  ) -> Result<Self, SpartanError> {
+    let (_prep_span, prep_t) = start_span!("shared_initialization");
 
-    // we synthesize shared witness for the first circuit; every other circuit including the core circuit shares this witness
-    let (_shared_span, shared_t) = start_span!("generate_shared_witness");
-    let mut ps =
+    // Shared witness (serial): seed for all per-circuit clones.
+    let ps =
       SatisfyingAssignment::shared_witness(&pk.S_step, &pk.ck, &step_circuits[0], is_small)?;
-    info!(elapsed_ms = %shared_t.elapsed().as_millis(), "generate_shared_witness");
 
-    let (_precommit_span, precommit_t) = start_span!(
-      "generate_precommitted_witnesses",
-      circuits = step_circuits.len() + 1
-    );
-    let ps_step = (0..step_circuits.len())
-      .into_par_iter()
-      .map(|i| {
-        // copy ps to avoid mutating the original shared witness
-        let mut ps_i = ps.clone();
-        SatisfyingAssignment::precommitted_witness(
-          &mut ps_i,
-          &pk.S_step,
-          &pk.ck,
-          &step_circuits[i],
-          is_small,
-        )?;
-        Ok(ps_i)
-      })
-      .collect::<Result<Vec<_>, _>>()?;
-
-    // we don't need to make a copy of ps for the core circuit, as it will be used only once
+    // Core precommitted witness + rerandomize (serial): produces comm_W_shared needed by steps.
+    let mut ps_core = ps.clone();
     SatisfyingAssignment::precommitted_witness(
-      &mut ps,
+      &mut ps_core,
       &pk.S_core,
       &pk.ck,
       core_circuit,
       is_small,
     )?;
-    info!(elapsed_ms = %precommit_t.elapsed().as_millis(), circuits = step_circuits.len() + 1, "generate_precommitted_witnesses");
+    ps_core.rerandomize_in_place(&pk.ck, &pk.S_core)?;
+    let comm_W_shared = ps_core.comm_W_shared.clone();
+    let r_W_shared = ps_core.r_W_shared.clone();
 
-    info!(elapsed_ms = %prep_t.elapsed().as_millis(), "neutronnova_prep_prove");
-    Ok(NeutronNovaPrepZkSNARK {
-      ps_step,
-      ps_core: ps,
-    })
-  }
+    info!(elapsed_ms = %prep_t.elapsed().as_millis(), "shared_initialization");
 
-  /// Prove the folding of a batch of R1CS instances and a core circuit that connects them together.
-  /// Takes ownership of `prep_snark` to avoid cloning large witness vectors (~66MB).
-  /// Returns the proof and the (consumed) prep state, which can be passed to prove again
-  /// after re-running prep_prove or simply re-rerandomized.
-  pub fn prove<C1: SpartanCircuit<E>, C2: SpartanCircuit<E>>(
-    pk: &NeutronNovaProverKey<E>,
-    step_circuits: &[C1],
-    core_circuit: &C2,
-    mut prep_snark: NeutronNovaPrepZkSNARK<E>,
-    is_small: bool, // do witness elements fit in machine words?
-  ) -> Result<(Self, NeutronNovaPrepZkSNARK<E>), SpartanError> {
     let (_prove_span, prove_t) = start_span!("neutronnova_prove");
 
-    // rerandomize prep state in-place (we own it, no clone needed)
-    let (_rerandomize_span, rerandomize_t) = start_span!("rerandomize_prep_state");
-    prep_snark
-      .ps_core
-      .rerandomize_in_place(&pk.ck, &pk.S_core)?;
-    let comm_W_shared = prep_snark.ps_core.comm_W_shared.clone();
-    let r_W_shared = prep_snark.ps_core.r_W_shared.clone();
-    prep_snark.ps_step.par_iter_mut().try_for_each(|ps_i| {
-      ps_i.rerandomize_with_shared_in_place(&pk.ck, &pk.S_step, &comm_W_shared, &r_W_shared)
-    })?;
-    info!(elapsed_ms = %rerandomize_t.elapsed().as_millis(), "rerandomize_prep_state");
-
-    // Parallel generation of instances and witnesses
-    let (_gen_span, gen_t) = start_span!(
-      "generate_instances_witnesses",
-      step_circuits = step_circuits.len()
-    );
-    let (res_steps, res_core) = rayon::join(
-      || {
-        prep_snark
-          .ps_step
-          .par_iter_mut()
-          .zip(step_circuits.par_iter().enumerate())
-          .map(|(pre_state, (i, circuit))| {
-            let mut transcript = E::TE::new(b"neutronnova_prove");
-            transcript.absorb(b"vk", &pk.vk_digest);
-            transcript.absorb(
-              b"num_circuits",
-              &E::Scalar::from(step_circuits.len() as u64),
-            );
-            transcript.absorb(b"circuit_index", &E::Scalar::from(i as u64));
-
-            let public_values =
-              circuit
-                .public_values()
-                .map_err(|e| SpartanError::SynthesisError {
-                  reason: format!("Circuit does not provide public IO: {e}"),
-                })?;
-            transcript.absorb(b"public_values", &public_values.as_slice());
-
-            SatisfyingAssignment::r1cs_instance_and_witness(
-              pre_state,
-              &pk.S_step,
-              &pk.ck,
-              circuit,
-              is_small,
-              &mut transcript,
-            )
-          })
-          .collect::<Result<Vec<_>, _>>()
-          .map(|pairs| {
-            let (instances, witnesses): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
-            (instances, witnesses)
-          })
-      },
-      || {
-        let mut transcript = E::TE::new(b"neutronnova_prove");
-        transcript.absorb(b"vk", &pk.vk_digest);
-        let public_values_core =
-          core_circuit
-            .public_values()
-            .map_err(|e| SpartanError::SynthesisError {
-              reason: format!("Core circuit does not provide public IO: {e}"),
-            })?;
-        transcript.absorb(b"public_values", &public_values_core.as_slice());
-        SatisfyingAssignment::r1cs_instance_and_witness(
-          &mut prep_snark.ps_core,
-          &pk.S_core,
-          &pk.ck,
-          core_circuit,
-          is_small,
-          &mut transcript,
-        )
-      },
-    );
-
-    let ((step_instances, step_witnesses), (core_instance, core_witness)) = (res_steps?, res_core?);
-    info!(elapsed_ms = %gen_t.elapsed().as_millis(), step_circuits = step_circuits.len(), "generate_instances_witnesses");
-
-    let (_reg_span, reg_t) = start_span!("convert_to_regular_instances");
-    let step_instances_regular = step_instances
-      .iter()
-      .map(|u| u.to_regular_instance())
-      .collect::<Result<Vec<_>, _>>()?;
-
-    let core_instance_regular = core_instance.to_regular_instance()?;
-    info!(elapsed_ms = %reg_t.elapsed().as_millis(), "convert_to_regular_instances");
-    // We start a new transcript for the NeutronNova NIFS proof
-    // All instances will be absorbed into the transcript
-    let mut transcript = E::TE::new(b"neutronnova_prove");
-    transcript.absorb(b"vk", &pk.vk_digest);
-
-    // absorb the core instance; NIFS will absorb the step instances
-    transcript.absorb(b"core_instance", &core_instance_regular);
-
-    let n_padded = step_instances_regular.len().next_power_of_two();
+    // Build verifier circuit before parallel section — sizes are known from pk and step count.
+    let n = step_circuits.len();
+    let n_padded = n.next_power_of_two();
     let num_vars = pk.S_step.num_shared + pk.S_step.num_precommitted + pk.S_step.num_rest;
     let num_rounds_b = n_padded.log_2();
     let num_rounds_x = pk.S_step.num_cons.log_2();
@@ -918,13 +756,124 @@ where
     );
     let mut vc_state = SatisfyingAssignment::<E>::initialize_multiround_witness(&pk.vc_shape)?;
 
+    // One parallel section: steps run the full pipeline per circuit; core runs r1cs + to_regular.
+    let (_gen_span, gen_t) = start_span!(
+      "generate_instances_witnesses",
+      step_circuits = step_circuits.len()
+    );
+    let (res_steps, res_core) = rayon::join(
+      || -> Result<Vec<_>, SpartanError> {
+        (0..n)
+          .into_par_iter()
+          .map(|i| -> Result<_, SpartanError> {
+            let mut ps_i = ps.clone();
+            SatisfyingAssignment::precommitted_witness(
+              &mut ps_i,
+              &pk.S_step,
+              &pk.ck,
+              &step_circuits[i],
+              is_small,
+            )?;
+            ps_i.rerandomize_with_shared_in_place(
+              &pk.ck,
+              &pk.S_step,
+              &comm_W_shared,
+              &r_W_shared,
+            )?;
+
+            let mut transcript = E::TE::new(b"neutronnova_prove");
+            transcript.absorb(b"vk", &pk.vk_digest);
+            transcript.absorb(b"num_circuits", &E::Scalar::from(n as u64));
+            transcript.absorb(b"circuit_index", &E::Scalar::from(i as u64));
+            let public_values = step_circuits[i].public_values().map_err(|e| {
+              SpartanError::SynthesisError {
+                reason: format!("Circuit does not provide public IO: {e}"),
+              }
+            })?;
+            transcript.absorb(b"public_values", &public_values.as_slice());
+
+            let (split_instance, witness) = SatisfyingAssignment::r1cs_instance_and_witness(
+              &mut ps_i,
+              &pk.S_step,
+              &pk.ck,
+              &step_circuits[i],
+              is_small,
+              &mut transcript,
+            )?;
+
+            let regular_instance = split_instance.to_regular_instance()?;
+
+            let mut z = Vec::with_capacity(witness.W.len() + 1 + regular_instance.X.len());
+            z.extend_from_slice(&witness.W);
+            z.push(E::Scalar::ONE);
+            z.extend_from_slice(&regular_instance.X);
+            let (av, bv, cv) = pk.S_step.multiply_vec(&z)?;
+
+            Ok((split_instance, witness, regular_instance, av, bv, cv))
+          })
+          .collect()
+      },
+      || -> Result<_, SpartanError> {
+        let mut transcript = E::TE::new(b"neutronnova_prove");
+        transcript.absorb(b"vk", &pk.vk_digest);
+        let public_values_core = core_circuit.public_values().map_err(|e| {
+          SpartanError::SynthesisError {
+            reason: format!("Core circuit does not provide public IO: {e}"),
+          }
+        })?;
+        transcript.absorb(b"public_values", &public_values_core.as_slice());
+        let (core_instance, core_witness) = SatisfyingAssignment::r1cs_instance_and_witness(
+          &mut ps_core,
+          &pk.S_core,
+          &pk.ck,
+          core_circuit,
+          is_small,
+          &mut transcript,
+        )?;
+        let core_instance_regular = core_instance.to_regular_instance()?;
+        Ok((core_instance, core_witness, core_instance_regular))
+      },
+    );
+
+    let step_tuples = res_steps?;
+    let (core_instance, core_witness, core_instance_regular) = res_core?;
+    info!(elapsed_ms = %gen_t.elapsed().as_millis(), step_circuits = step_circuits.len(), "generate_instances_witnesses");
+
+    // Unpack step results and pad A/B/C layers to n_padded (cloning from index 0).
+    let mut step_instances = Vec::with_capacity(n);
+    let mut step_witnesses = Vec::with_capacity(n);
+    let mut step_instances_regular = Vec::with_capacity(n);
+    let mut A_layers = Vec::with_capacity(n_padded);
+    let mut B_layers = Vec::with_capacity(n_padded);
+    let mut C_layers = Vec::with_capacity(n_padded);
+    for (si, w, ri, av, bv, cv) in step_tuples {
+      step_instances.push(si);
+      step_witnesses.push(w);
+      step_instances_regular.push(ri);
+      A_layers.push(av);
+      B_layers.push(bv);
+      C_layers.push(cv);
+    }
+    for _ in n..n_padded {
+      A_layers.push(A_layers[0].clone());
+      B_layers.push(B_layers[0].clone());
+      C_layers.push(C_layers[0].clone());
+    }
+
+    // NIFS transcript: absorb core instance, then NIFS will absorb step instances.
+    let mut transcript = E::TE::new(b"neutronnova_prove");
+    transcript.absorb(b"vk", &pk.vk_digest);
+    transcript.absorb(b"core_instance", &core_instance_regular);
+
     let (_nifs_span, nifs_t) = start_span!("NIFS");
     let (E_eq, Az_step, Bz_step, Cz_step, folded_W, folded_U) = NeutronNovaNIFS::<E>::prove(
       &pk.S_step,
       &pk.ck,
       step_instances_regular,
       step_witnesses,
-      None,
+      A_layers,
+      B_layers,
+      C_layers,
       &mut vc,
       &mut vc_state,
       &pk.vc_shape,
@@ -1239,7 +1188,7 @@ where
     };
 
     info!(elapsed_ms = %prove_t.elapsed().as_millis(), "neutronnova_prove");
-    Ok((result, prep_snark))
+    Ok(result)
   }
 
   /// Verifies the NeutronNovaZkSNARK and returns the public IO from the instances
@@ -1616,11 +1565,10 @@ mod tests {
       step_circuits.len()
     );
 
-    let ps = NeutronNovaZkSNARK::<E>::prep_prove(pk, step_circuits, core_circuit, true).unwrap();
-    let res = NeutronNovaZkSNARK::prove(pk, step_circuits, core_circuit, ps, true);
+    let res = NeutronNovaZkSNARK::prove(pk, step_circuits, core_circuit, true);
     assert!(res.is_ok());
 
-    let (snark, _ps) = res.unwrap();
+    let snark = res.unwrap();
     let res = snark.verify(vk, step_circuits.len());
     println!(
       "[bench_neutron_inner] name: {name}, num_circuits: {}, verify res: {:?}",

@@ -66,12 +66,8 @@ fn main() {
   let core_circuit = &step_circuits[0];
 
   let t0 = Instant::now();
-  let prep = NeutronNovaZkSNARK::<E>::prep_prove(&pk, &step_circuits, core_circuit, true).unwrap();
-  info!(elapsed_ms = t0.elapsed().as_millis(), "prep_prove");
-
-  let t0 = Instant::now();
-  let (snark, _prep) =
-    NeutronNovaZkSNARK::prove(&pk, &step_circuits, core_circuit, prep, true).unwrap();
+  let snark =
+    NeutronNovaZkSNARK::prove(&pk, &step_circuits, core_circuit, true).unwrap();
   info!(elapsed_ms = t0.elapsed().as_millis(), "prove");
 
   let t0 = Instant::now();
