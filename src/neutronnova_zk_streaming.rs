@@ -7,9 +7,13 @@
 //! This implements a "Read/Write Streaming" version of the proof system in neutronnova_zk_streaming.rs.
 //! For ease of implementation (and because there were some bugs in the implementation at time of writing),
 //! this doesn't implement the "small value sumcheck" optimizations. 
+use scribe_streams::{
+  iterator::{BatchedIterator, from_iter},
+  serialize::{DeserializeRaw, SerializeRaw},
+};
 use crate::start_span;
 use crate::{
-  Commitment, CommitmentKey, DEFAULT_COMMITMENT_WIDTH, VerifierKey,
+  Commitment, CommitmentKey, VerifierKey,
   bellpepper::{
     r1cs::{
       MultiRoundSpartanShape, MultiRoundSpartanWitness, SpartanShape,
@@ -95,12 +99,15 @@ where
     round: usize,
     (left, right): (usize, usize),
     e: &[E::Scalar],
-    Az1: &[E::Scalar],
-    Bz1: &[E::Scalar],
-    Cz1: &[E::Scalar],
-    Az2: &[E::Scalar],
-    Bz2: &[E::Scalar],
-  ) -> (E::Scalar, E::Scalar) {
+    Az1: &scribe_streams::file_vec::FileVec<E::Scalar>,
+    Bz1: &scribe_streams::file_vec::FileVec<E::Scalar>,
+    Cz1: &scribe_streams::file_vec::FileVec<E::Scalar>,
+    Az2: &scribe_streams::file_vec::FileVec<E::Scalar>,
+    Bz2: &scribe_streams::file_vec::FileVec<E::Scalar>,
+  ) -> (E::Scalar, E::Scalar)
+  where
+    E::Scalar: SerializeRaw + DeserializeRaw,
+  {
     type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
 
     // sanity check sizes
@@ -114,57 +121,67 @@ where
     let mut acc_e0 = Acc::<E::Scalar>::default();
     let mut acc_quad = Acc::<E::Scalar>::default();
 
-    for i in 0..right {
-      let base = i * left;
+    if compute_e0 {
+      let mut iter = Az1.iter()
+        .zip(Bz1.iter())
+        .zip(Cz1.iter())
+        .zip(Az2.iter())
+        .zip(Bz2.iter());
+      let mut idx = 0usize;
       let mut inner_e0 = Acc::<E::Scalar>::default();
       let mut inner_quad = Acc::<E::Scalar>::default();
-
-      if compute_e0 {
-        for j in 0..left {
-          let k = base + j;
-          let inner_val = Az1[k] * Bz1[k] - Cz1[k];
+      while let Some(batch) = iter.next_batch() {
+        for ((((az1, bz1), cz1), az2), bz2) in batch.collect::<Vec<_>>() {
+          let j = idx % left;
+          let i = idx / left;
+          let inner_val = az1 * bz1 - cz1;
           <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-            &mut inner_e0,
-            &e_left[j],
-            &inner_val,
+            &mut inner_e0, &e_left[j], &inner_val,
           );
-          let az_diff = Az2[k] - Az1[k];
-          let bz_diff = Bz2[k] - Bz1[k];
-          let quad_val = az_diff * bz_diff;
+          let quad_val = (az2 - az1) * (bz2 - bz1);
           <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-            &mut inner_quad,
-            &e_left[j],
-            &quad_val,
+            &mut inner_quad, &e_left[j], &quad_val,
           );
-        }
-      } else {
-        for j in 0..left {
-          let k = base + j;
-          let az_diff = Az2[k] - Az1[k];
-          let bz_diff = Bz2[k] - Bz1[k];
-          let quad_val = az_diff * bz_diff;
-          <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-            &mut inner_quad,
-            &e_left[j],
-            &quad_val,
-          );
+          if j == left - 1 {
+            let inner_e0_red = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_e0);
+            let inner_quad_red = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_quad);
+            inner_e0 = Acc::<E::Scalar>::default();
+            inner_quad = Acc::<E::Scalar>::default();
+            <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+              &mut acc_e0, &f[i], &inner_e0_red,
+            );
+            <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+              &mut acc_quad, &f[i], &inner_quad_red,
+            );
+          }
+          idx += 1;
         }
       }
-
-      let inner_e0_red = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_e0);
-      let inner_quad_red = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_quad);
-
-      let f_i = &f[i];
-      <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-        &mut acc_e0,
-        f_i,
-        &inner_e0_red,
-      );
-      <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-        &mut acc_quad,
-        f_i,
-        &inner_quad_red,
-      );
+    } else {
+      let mut iter = Az1.iter()
+        .zip(Bz1.iter())
+        .zip(Az2.iter())
+        .zip(Bz2.iter());
+      let mut idx = 0usize;
+      let mut inner_quad = Acc::<E::Scalar>::default();
+      while let Some(batch) = iter.next_batch() {
+        for (((az1, bz1), az2), bz2) in batch.collect::<Vec<_>>() {
+          let j = idx % left;
+          let i = idx / left;
+          let quad_val = (az2 - az1) * (bz2 - bz1);
+          <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+            &mut inner_quad, &e_left[j], &quad_val,
+          );
+          if j == left - 1 {
+            let inner_quad_red = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_quad);
+            inner_quad = Acc::<E::Scalar>::default();
+            <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+              &mut acc_quad, &f[i], &inner_quad_red,
+            );
+          }
+          idx += 1;
+        }
+      }
     }
 
     (
@@ -173,14 +190,17 @@ where
     )
   }
 
-  /// Like `compact_folded_layers_abc`: compact folded results from positions [4j, 4j+2]
+  /// Compact folded results from positions [4j, 4j+2]
   /// down to [2j, 2j+1] for A, B, and C layers.
   fn compact_folded_layers_abc(
-    a: &mut [Vec<E::Scalar>],
-    b: &mut [Vec<E::Scalar>],
-    c: &mut [Vec<E::Scalar>],
+    a: &mut [scribe_streams::file_vec::FileVec<E::Scalar>],
+    b: &mut [scribe_streams::file_vec::FileVec<E::Scalar>],
+    c: &mut [scribe_streams::file_vec::FileVec<E::Scalar>],
     prove_pairs: usize,
-  ) {
+  )
+  where
+    E::Scalar: SerializeRaw + DeserializeRaw,
+  {
     for j in 0..prove_pairs {
       a.swap(2 * j, 4 * j);
       a.swap(2 * j + 1, 4 * j + 2);
@@ -202,12 +222,14 @@ where
   /// - the sequence of challenges r_b used to fold instances/witnesses.
   pub fn prove(
     S: &SplitR1CSShape<E>,
-    ck: &CommitmentKey<E>,
+    _ck: &CommitmentKey<E>,
     Us: Vec<R1CSInstance<E>>,
-    Ws: Vec<R1CSWitness<E>>,
-    mut A_layers: Vec<Vec<E::Scalar>>,
-    mut B_layers: Vec<Vec<E::Scalar>>,
-    mut C_layers: Vec<Vec<E::Scalar>>,
+    mut Ws_is_small: Vec<bool>,
+    mut Ws_r_W: Vec<<E::PCS as PCSEngineTrait<E>>::Blind>,
+    mut Ws_W: Vec<scribe_streams::file_vec::FileVec<E::Scalar>>,
+    mut A_layers: Vec<scribe_streams::file_vec::FileVec<E::Scalar>>,
+    mut B_layers: Vec<scribe_streams::file_vec::FileVec<E::Scalar>>,
+    mut C_layers: Vec<scribe_streams::file_vec::FileVec<E::Scalar>>,
     vc: &mut NeutronNovaVerifierCircuit<E>,
     vc_state: &mut <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::MultiRoundState, // wrapper circuit, fine
     vc_shape: &SplitMultiRoundR1CSShape<E>, // wrapper circuit, fine
@@ -223,7 +245,10 @@ where
       R1CSInstance<E>, // final folded instance
     ),
     SpartanError,
-  > {
+  >
+  where
+    E::Scalar: SerializeRaw + DeserializeRaw,
+  {
     // Determine padding and NIFS rounds
     let n = Us.len();
     let n_padded = Us.len().next_power_of_two();
@@ -236,11 +261,15 @@ where
     );
 
     let mut Us = Us;
-    let mut Ws = Ws;
     if Us.len() < n_padded {
       Us.extend(vec![Us[0].clone(); n_padded - n]);
-      Ws.extend(vec![Ws[0].clone(); n_padded - n]);
+      Ws_is_small.extend(vec![Ws_is_small[0]; n_padded - n]);
+      Ws_r_W.extend(vec![Ws_r_W[0].clone(); n_padded - n]);
+      for _ in n..n_padded {
+        Ws_W.push(scribe_streams::file_vec::FileVec::clone(&Ws_W[0]));
+      }
     }
+    let (_absorb_span, absorb_t) = start_span!("transcript_operations");
     for U in Us.iter() {
       transcript.absorb(b"U", U);
     }
@@ -257,6 +286,7 @@ where
     for _ in 0..ell_b {
       rhos.push(transcript.squeeze(b"rho")?);
     }
+    info!(elapsed_ms = %absorb_t.elapsed().as_millis(), "transcript_operations");
 
     // Execute NIFS rounds, generating cubic polynomials and driving r_b via multi-round state
 
@@ -307,28 +337,25 @@ where
         {
           let even = std::mem::take(&mut A_layers[$src_even]);
           let odd = &A_layers[$src_odd];
-          let mut folded = even;
-          folded.iter_mut().zip(odd.iter()).for_each(|(l, h)| {
-            *l += $r_b * (*h - *l);
-          });
+          let folded = even.iter().zip(odd.iter()).map(|(l, h)| {
+            l + $r_b * (h - l)
+          }).to_file_vec();
           A_layers[$dest] = folded;
         }
         {
           let even = std::mem::take(&mut B_layers[$src_even]);
           let odd = &B_layers[$src_odd];
-          let mut folded = even;
-          folded.iter_mut().zip(odd.iter()).for_each(|(l, h)| {
-            *l += $r_b * (*h - *l);
-          });
+          let folded = even.iter().zip(odd.iter()).map(|(l, h)| {
+            l + $r_b * (h - l)
+          }).to_file_vec();
           B_layers[$dest] = folded;
         }
         {
           let even = std::mem::take(&mut C_layers[$src_even]);
           let odd = &C_layers[$src_odd];
-          let mut folded = even;
-          folded.iter_mut().zip(odd.iter()).for_each(|(l, h)| {
-            *l += $r_b * (*h - *l);
-          });
+          let folded = even.iter().zip(odd.iter()).map(|(l, h)| {
+            l + $r_b * (h - l)
+          }).to_file_vec();
           C_layers[$dest] = folded;
         }
       }};
@@ -401,17 +428,15 @@ where
               for chunk in [&mut *a_chunk, &mut *b_chunk, &mut *c_chunk] {
                 {
                   let (lo, hi) = chunk.split_at_mut(1);
-                  lo[0]
-                    .iter_mut()
-                    .zip(hi[0].iter())
-                    .for_each(|(l, h)| *l += prev_r_b * (*h - *l));
+                  lo[0] = lo[0].iter().zip(hi[0].iter()).map(|(l, h)| {
+                    l + prev_r_b * (h - l)
+                  }).to_file_vec();
                 }
                 {
                   let (lo, hi) = chunk.split_at_mut(3);
-                  lo[2]
-                    .iter_mut()
-                    .zip(hi[0].iter())
-                    .for_each(|(l, h)| *l += prev_r_b * (*h - *l));
+                  lo[2] = lo[2].iter().zip(hi[0].iter()).map(|(l, h)| {
+                    l + prev_r_b * (h - l)
+                  }).to_file_vec();
                 }
               }
               // Prove from folded positions [0] and [2]
@@ -471,20 +496,21 @@ where
     // The rest portion (indices effective_len..) is all zero for step circuits,
     // so the folded result there is also zero. We resize back after folding.
     // Only apply when shared+precommitted > 0 (otherwise truncation would zero everything).
-    let effective_len = S.num_shared + S.num_precommitted;
-    let use_truncated_fold = effective_len > 0;
-    if use_truncated_fold {
-      for w in Ws.iter_mut() {
-        w.W.truncate(effective_len);
-      }
-    }
+    // This doesn't apply and is hard to implemetn with filevec. Did not implement.
+    // let effective_len = S.num_shared + S.num_precommitted;
+    // let use_truncated_fold = effective_len > 0;
+    // if use_truncated_fold {
+    //   for w in Ws_W.iter_mut() {
+    //     w.W.truncate(effective_len);
+    //   }
+    // }
 
     let (_fold_final_span, fold_final_t) = start_span!("fold_witnesses");
-    let mut folded_W = R1CSWitness::fold_multiple(&r_bs, &Ws)?;
-    if use_truncated_fold {
-      let full_dim = S.num_shared + S.num_precommitted + S.num_rest;
-      folded_W.W.resize(full_dim, E::Scalar::ZERO);
-    }
+    let folded_W = R1CSWitness::fold_multiple_streaming(&r_bs, &Ws_r_W, &Ws_W)?;
+    // if use_truncated_fold {
+    //   let full_dim = S.num_shared + S.num_precommitted + S.num_rest;
+    //   folded_W.W.resize(full_dim, E::Scalar::ZERO);
+    // }
     info!(elapsed_ms = %fold_final_t.elapsed().as_millis(), "fold_witnesses");
 
     // Optimized instance fold: only MSM data rows (shared+precommitted),
@@ -503,26 +529,28 @@ where
     }
 
     let comms: Vec<_> = Us.iter().map(|U| U.comm_W.clone()).collect();
-    let comm_acc = if use_truncated_fold {
-      let num_data_rows = (S.num_shared + S.num_precommitted).div_ceil(DEFAULT_COMMITMENT_WIDTH);
-      <E::PCS as FoldingEngineTrait<E>>::fold_commitments_partial(
-        &comms,
-        &w,
-        num_data_rows,
-        &folded_W.r_W,
-        ck,
-      )?
-    } else {
-      <E::PCS as FoldingEngineTrait<E>>::fold_commitments(&comms, &w)?
-    };
+    let comm_acc = <E::PCS as FoldingEngineTrait<E>>::fold_commitments(&comms, &w)?;
+    
+    // if use_truncated_fold {
+    //   let num_data_rows = (S.num_shared + S.num_precommitted).div_ceil(DEFAULT_COMMITMENT_WIDTH);
+    //   <E::PCS as FoldingEngineTrait<E>>::fold_commitments_partial(
+    //     &comms,
+    //     &w,
+    //     num_data_rows,
+    //     &folded_W.r_W,
+    //     ck,
+    //   )?
+    // } else {
+    //   <E::PCS as FoldingEngineTrait<E>>::fold_commitments(&comms, &w)?
+    // };
     let folded_U = R1CSInstance::<E>::new_unchecked(comm_acc, X_acc)?;
     info!(elapsed_ms = %fold_final_t.elapsed().as_millis(), "fold_instances");
 
     Ok((
       E_eq,
-      std::mem::take(&mut A_layers[0]),
-      std::mem::take(&mut B_layers[0]),
-      std::mem::take(&mut C_layers[0]),
+      std::mem::take(&mut A_layers[0]).into_vec(),
+      std::mem::take(&mut B_layers[0]).into_vec(),
+      std::mem::take(&mut C_layers[0]).into_vec(),
       folded_W,
       folded_U,
     ))
@@ -716,7 +744,10 @@ where
     step_circuits: &[C1],
     core_circuit: &C2,
     is_small: bool,
-  ) -> Result<Self, SpartanError> {
+  ) -> Result<Self, SpartanError>
+  where
+    E::Scalar: SerializeRaw + DeserializeRaw,
+  {
     let (_prep_span, prep_t) = start_span!("shared_initialization");
 
     // Shared witness (serial): seed for all per-circuit clones.
@@ -807,9 +838,15 @@ where
             z.extend_from_slice(&witness.W);
             z.push(E::Scalar::ONE);
             z.extend_from_slice(&regular_instance.X);
-            let (av, bv, cv) = pk.S_step.multiply_vec(&z)?;
+            let (av_fv, bv_fv, cv_fv) =
+              from_iter(pk.S_step.multiply_vec_iter(&z)?).unzip3();
 
-            Ok((split_instance, witness, regular_instance, av, bv, cv))
+            let R1CSWitness { W, r_W, is_small } = witness;
+            // TODO: Make this stylistically look like Pratyush's code. 
+            // TODO: should be able to do a non-owning iter and move it up to get a bit more interleaving.
+            let w_fv = from_iter(W.into_iter()).to_file_vec();
+
+            Ok((split_instance, is_small, r_W, w_fv, regular_instance, av_fv, bv_fv, cv_fv))
           })
           .collect()
       },
@@ -839,25 +876,36 @@ where
     let (core_instance, core_witness, core_instance_regular) = res_core?;
     info!(elapsed_ms = %gen_t.elapsed().as_millis(), step_circuits = step_circuits.len(), "generate_instances_witnesses");
 
+    let du_out = std::process::Command::new("du")
+      .args(["-sk", "/tmp"])
+      .output();
+    if let Ok(out) = du_out {
+      print!("{}", String::from_utf8_lossy(&out.stdout));
+    }
+
     // Unpack step results and pad A/B/C layers to n_padded (cloning from index 0).
     let mut step_instances = Vec::with_capacity(n);
-    let mut step_witnesses = Vec::with_capacity(n);
+    let mut step_witness_blinds = Vec::with_capacity(n);
+    let mut step_witness_is_small = Vec::with_capacity(n);
+    let mut step_witnesses: Vec<scribe_streams::file_vec::FileVec<E::Scalar>> = Vec::with_capacity(n);
     let mut step_instances_regular = Vec::with_capacity(n);
-    let mut A_layers = Vec::with_capacity(n_padded);
-    let mut B_layers = Vec::with_capacity(n_padded);
-    let mut C_layers = Vec::with_capacity(n_padded);
-    for (si, w, ri, av, bv, cv) in step_tuples {
+    let mut A_layers: Vec<scribe_streams::file_vec::FileVec<E::Scalar>> = Vec::with_capacity(n_padded);
+    let mut B_layers: Vec<scribe_streams::file_vec::FileVec<E::Scalar>> = Vec::with_capacity(n_padded);
+    let mut C_layers: Vec<scribe_streams::file_vec::FileVec<E::Scalar>> = Vec::with_capacity(n_padded);
+    for (si, is_small, r_W, w_fv, ri, av_fv, bv_fv, cv_fv) in step_tuples {
       step_instances.push(si);
-      step_witnesses.push(w);
+      step_witness_is_small.push(is_small);
+      step_witness_blinds.push(r_W);
+      step_witnesses.push(w_fv);
       step_instances_regular.push(ri);
-      A_layers.push(av);
-      B_layers.push(bv);
-      C_layers.push(cv);
+      A_layers.push(av_fv);
+      B_layers.push(bv_fv);
+      C_layers.push(cv_fv);
     }
     for _ in n..n_padded {
-      A_layers.push(A_layers[0].clone());
-      B_layers.push(B_layers[0].clone());
-      C_layers.push(C_layers[0].clone());
+      A_layers.push(scribe_streams::file_vec::FileVec::clone(&A_layers[0]));
+      B_layers.push(scribe_streams::file_vec::FileVec::clone(&B_layers[0]));
+      C_layers.push(scribe_streams::file_vec::FileVec::clone(&C_layers[0]));
     }
 
     // NIFS transcript: absorb core instance, then NIFS will absorb step instances.
@@ -870,6 +918,8 @@ where
       &pk.S_step,
       &pk.ck,
       step_instances_regular,
+      step_witness_is_small,
+      step_witness_blinds,
       step_witnesses,
       A_layers,
       B_layers,

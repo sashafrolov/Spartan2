@@ -191,7 +191,7 @@ impl<F: PrimeField> PrecomputedSparseMatrix<F> {
   }
 
   #[inline(always)]
-  fn compute_row_single(&self, row: usize, v: &[F]) -> F {
+  pub(crate) fn compute_row_single(&self, row: usize, v: &[F]) -> F {
     let mut sum = F::ZERO;
 
     let (start, end) = self.range_unit_pos(row);

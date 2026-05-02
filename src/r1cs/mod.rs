@@ -598,11 +598,8 @@ impl<E: Engine> R1CSWitness<E> {
     }
 
     let mut acc_W = vec![E::Scalar::ZERO; dim];
-    let tile = 4096; // process 4096 elements at a time
+    let tile = 4096;
 
-    // Check if all witnesses have small values (fit in u64).
-    // For SHA256 circuits, witnesses are mostly boolean (0/1),
-    // so we can skip the expensive field multiplication for those.
     let all_small = Ws.iter().all(|wz| wz.is_small);
 
     acc_W
@@ -610,18 +607,15 @@ impl<E: Engine> R1CSWitness<E> {
       .enumerate()
       .for_each(|(block_idx, acc_blk)| {
         let start = block_idx * tile;
-        let end = start + acc_blk.len(); // last block may be < tile
+        let end = start + acc_blk.len();
 
         if all_small {
-          // Fast path: witness values fit in u64.
-          // Skip zero values and use addition for unit values.
           let zero = E::Scalar::ZERO;
           let one = E::Scalar::ONE;
           for (i, &wi) in w.iter().enumerate() {
             let row_slice = &Ws[i].W[start..end];
             for (a, x) in acc_blk.iter_mut().zip(row_slice.iter()) {
               if *x == zero {
-                // skip
               } else if *x == one {
                 *a += wi;
               } else {
@@ -630,8 +624,6 @@ impl<E: Engine> R1CSWitness<E> {
             }
           }
         } else {
-          // General path: delayed reduction with element-major access.
-          // Uses a single accumulator (in registers) per element instead of a large buffer.
           type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
           for (j, acc_blk_j) in acc_blk.iter_mut().enumerate() {
             let mut acc = Acc::<E::Scalar>::default();
@@ -649,6 +641,78 @@ impl<E: Engine> R1CSWitness<E> {
 
     let acc_r = <E::PCS as FoldingEngineTrait<E>>::fold_blinds(
       &Ws.iter().map(|wz| wz.r_W.clone()).collect::<Vec<_>>(),
+      &w,
+    )?;
+
+    Ok(R1CSWitness::<E> {
+      W: acc_W,
+      r_W: acc_r,
+      is_small: false,
+    })
+  }
+
+  /// Streaming version of `fold_multiple` that operates on `FileVec` witnesses.
+  pub fn fold_multiple_streaming(
+    r_bs: &[E::Scalar],
+    Ws_r_W: &[<E::PCS as PCSEngineTrait<E>>::Blind],
+    Ws_W: &[scribe_streams::file_vec::FileVec<E::Scalar>],
+  ) -> Result<R1CSWitness<E>, SpartanError>
+  where
+    E::PCS: FoldingEngineTrait<E>,
+    E::Scalar: scribe_streams::serialize::SerializeRaw + scribe_streams::serialize::DeserializeRaw,
+  {
+    let n = Ws_W.len();
+    if n == 0 {
+      return Err(SpartanError::InvalidInputLength {
+        reason: "fold_multiple_streaming: empty witness list".into(),
+      });
+    }
+
+    let w = weights_from_r::<E::Scalar>(r_bs, n);
+
+    if w.len() != n {
+      return Err(SpartanError::InvalidInputLength {
+        reason: "fold_multiple_streaming: weights length mismatch".into(),
+      });
+    }
+
+    let dim = Ws_W[0].len();
+
+    if !Ws_W.iter().all(|z| z.len() == dim) {
+      return Err(SpartanError::InvalidInputLength {
+        reason: "fold_multiple_streaming: all W vectors must have the same length".into(),
+      });
+    }
+
+    let Ws_vecs: Vec<Vec<E::Scalar>> = Ws_W.par_iter()
+      .map(|fv| scribe_streams::file_vec::FileVec::clone(fv).into_vec())
+      .collect();
+
+    let mut acc_W = vec![E::Scalar::ZERO; dim];
+    let tile = 4096;
+
+    acc_W
+      .par_chunks_mut(tile)
+      .enumerate()
+      .for_each(|(block_idx, acc_blk)| {
+        let start = block_idx * tile;
+
+        type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
+        for (j, acc_blk_j) in acc_blk.iter_mut().enumerate() {
+          let mut acc = Acc::<E::Scalar>::default();
+          for (i, &wi) in w.iter().enumerate() {
+            <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+              &mut acc,
+              &wi,
+              &Ws_vecs[i][start + j],
+            );
+          }
+          *acc_blk_j = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc);
+        }
+      });
+
+    let acc_r = <E::PCS as FoldingEngineTrait<E>>::fold_blinds(
+      &Ws_r_W.iter().cloned().collect::<Vec<_>>(),
       &w,
     )?;
 
@@ -804,6 +868,43 @@ pub struct SplitR1CSInstance<E: Engine> {
   pub(crate) public_values: Vec<E::Scalar>,
   pub(crate) challenges: Vec<E::Scalar>,
 }
+
+/// Lazy row-by-row iterator over (Az, Bz, Cz) for a `SplitR1CSShape`.
+/// Each call to `next()` computes one row of all three matrices against `z`
+/// rather than materializing the full output vectors up front.
+pub struct MultiplyVecIter<'a, F: PrimeField> {
+  pa: &'a PrecomputedSparseMatrix<F>,
+  pb: &'a PrecomputedSparseMatrix<F>,
+  pc: &'a PrecomputedSparseMatrix<F>,
+  z: &'a [F],
+  row: usize,
+  num_rows: usize,
+}
+
+impl<'a, F: PrimeField> Iterator for MultiplyVecIter<'a, F> {
+  type Item = (F, F, F);
+
+  #[inline(always)]
+  fn next(&mut self) -> Option<(F, F, F)> {
+    if self.row >= self.num_rows {
+      return None;
+    }
+    let r = self.row;
+    self.row += 1;
+    Some((
+      self.pa.compute_row_single(r, self.z),
+      self.pb.compute_row_single(r, self.z),
+      self.pc.compute_row_single(r, self.z),
+    ))
+  }
+
+  fn size_hint(&self) -> (usize, Option<usize>) {
+    let remaining = self.num_rows - self.row;
+    (remaining, Some(remaining))
+  }
+}
+
+impl<'a, F: PrimeField> ExactSizeIterator for MultiplyVecIter<'a, F> {}
 
 impl<E: Engine> SplitR1CSShape<E> {
   /// Create an object of type `R1CSShape` from the explicitly specified R1CS matrices
@@ -1104,6 +1205,33 @@ impl<E: Engine> SplitR1CSShape<E> {
       );
       Ok((az, bz, cz))
     }
+  }
+
+  /// Like `multiply_vec` but returns a lazy iterator that computes one (Az, Bz, Cz)
+  /// row-triple at a time, avoiding materializing all three output vectors at once.
+  pub fn multiply_vec_iter<'a>(
+    &'a self,
+    z: &'a [E::Scalar],
+  ) -> Result<MultiplyVecIter<'a, E::Scalar>, SpartanError> {
+    if z.len()
+      != self.num_public
+        + self.num_challenges
+        + 1
+        + self.num_shared
+        + self.num_precommitted
+        + self.num_rest
+    {
+      return Err(SpartanError::InvalidWitnessLength);
+    }
+    self.ensure_precomputed();
+    Ok(MultiplyVecIter {
+      pa: self.precomp_A.get().unwrap(),
+      pb: self.precomp_B.get().unwrap(),
+      pc: self.precomp_C.get().unwrap(),
+      z,
+      row: 0,
+      num_rows: self.num_cons,
+    })
   }
 
   /// Compute partial matrix-vector product for shared + precommitted columns.
