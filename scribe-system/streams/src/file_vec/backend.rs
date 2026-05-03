@@ -153,11 +153,13 @@ impl InnerFile {
         options.read(true).write(true).create(true);
         #[cfg(target_os = "linux")]
         options.custom_flags(libc::O_DIRECT);
+        let temp_dir = std::env::var_os("SCRIBE_TEMP_DIR")
+            .unwrap_or_else(|| "/home/sfrolov/scratch/temp_neutronnova_files".into());
         let (file, path) = Builder::new()
             .prefix(&prefix)
             .suffix(".scribe")
             .disable_cleanup(true)
-            .make(|p| options.open(p))
+            .make_in(temp_dir, |p| options.open(p))
             .expect("failed to open file")
             .keep()
             .expect("failed to keep file");
