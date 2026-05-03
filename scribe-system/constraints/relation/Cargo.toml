@@ -1,0 +1,32 @@
+[package]
+name = "jf-relation"
+description = "Jellyfish constraint system for PLONK"
+version = "0.4.4"
+authors = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+
+[dependencies]
+ark-ff = { workspace =  true }
+ark-ec = { workspace =  true }
+ark-poly = { workspace =  true }
+ark-serialize = { workspace = true }
+ark-std = { workspace = true }
+
+ark-ed-on-bls12-377 = { workspace = true}
+ark-bls12-377 = { workspace = true}
+ark-bls12-381 = { workspace = true}
+ark-ed-on-bls12-381 = { workspace = true}
+ark-ed-on-bls12-381-bandersnatch = { workspace = true}
+ark-ed-on-bn254 = { workspace = true}
+ark-bn254 = { workspace = true}
+
+scribe-streams = { path = "../../streams" }
+
+derivative = { workspace = true }
+rayon = { workspace = true }
+
+downcast-rs = { version = "2", default-features = false }
+dyn-clone = "^1.0"
+itertools = { workspace = true }
+num-bigint = { workspace = true }

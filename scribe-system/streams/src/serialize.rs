@@ -1,0 +1,631 @@
+use rayon::prelude::*;
+use std::{
+    io,
+    mem::{self, MaybeUninit},
+};
+
+use ark_ec::{
+    AffineRepr,
+    short_weierstrass::{Affine as SWAffine, SWCurveConfig},
+    twisted_edwards::{Affine as TEAffine, TECurveConfig},
+};
+use ark_ff::{AdditiveGroup, BigInt, Field, Fp, FpConfig, PrimeField};
+use ark_serialize::{Read, Write};
+
+use crate::file_vec::backend::ReadN;
+
+use super::file_vec::AVec;
+
+pub trait SerializeRaw: Sized {
+    const SIZE: usize = mem::size_of::<Self>();
+
+    fn serialize_raw(&self, writer: &mut &mut [u8]) -> Option<()>;
+
+    fn serialize_raw_batch(
+        result_buffer: &[Self],
+        work_buffer: &mut AVec,
+        mut file: impl crate::file_vec::WriteAligned,
+    ) -> Result<(), io::Error>
+    where
+        Self: Sync + Send + Sized,
+    {
+        if result_buffer.is_empty() {
+            return Ok(());
+        }
+        work_buffer.clear();
+        let n = result_buffer.len() * Self::SIZE;
+        work_buffer.reserve(n);
+        // Safety: `work_buffer` is empty and has capacity at least `n`.
+        unsafe {
+            work_buffer.set_len(n);
+        }
+        work_buffer.fill(0);
+
+        work_buffer
+            .par_chunks_mut(Self::SIZE)
+            .zip(result_buffer)
+            .with_min_len(1 << 8)
+            .for_each(|(mut chunk, val)| {
+                val.serialize_raw(&mut chunk).unwrap();
+            });
+        file.write_all(work_buffer)?;
+        Ok(())
+    }
+}
+
+pub trait DeserializeRaw: SerializeRaw + Sized + std::fmt::Debug + Copy {
+    fn deserialize_raw(reader: &mut &[u8]) -> Option<Self>;
+
+    fn deserialize_raw_batch(
+        result_buffer: &mut Vec<Self>,
+        work_buffer: &mut AVec,
+        batch_size: usize,
+        mut file: impl ReadN,
+    ) -> Result<(), io::Error>
+    where
+        Self: Sync + Send,
+    {
+        work_buffer.clear();
+        result_buffer.clear();
+        let size = Self::SIZE;
+        file.read_n(work_buffer, size * batch_size)?;
+
+        if rayon::current_num_threads() == 1 {
+            result_buffer.extend(
+                work_buffer
+                    .chunks(size)
+                    .map(|mut chunk| Self::deserialize_raw(&mut chunk).unwrap()),
+            );
+        } else {
+            work_buffer
+                .par_chunks(size)
+                .with_min_len(1 << 10)
+                .map(|mut chunk| Self::deserialize_raw(&mut chunk).unwrap())
+                .collect_into_vec(result_buffer);
+        }
+
+        Ok(())
+    }
+}
+
+pub(crate) fn serialize_and_deserialize_raw_batch<
+    T: SerializeRaw + DeserializeRaw + Sync + Send,
+>(
+    write_buffer: &[T],
+    write_work_buffer: &mut AVec,
+    mut write_file: impl crate::file_vec::WriteAligned + Send,
+    read_buffer: &mut Vec<T>,
+    read_work_buffer: &mut AVec,
+    mut read_file: impl ReadN + Send,
+    batch_size: usize,
+) -> Result<(), io::Error> {
+    // Serialize
+    let (write_to_buf, read_to_buf) = rayon::join(
+        || -> Result<(), io::Error> {
+            if write_buffer.is_empty() {
+                return Ok(());
+            }
+            write_work_buffer
+                .par_chunks_mut(T::SIZE)
+                .zip(write_buffer)
+                .with_min_len(1 << 10)
+                .for_each(|(mut chunk, val)| val.serialize_raw(&mut chunk).unwrap());
+            Ok(())
+        },
+        || -> Result<(), io::Error> {
+            read_work_buffer.clear();
+            read_buffer.clear();
+            read_file.read_n(read_work_buffer, T::SIZE * batch_size)?;
+            Ok(())
+        },
+    );
+    write_to_buf?;
+    read_to_buf?;
+    if !write_buffer.is_empty() {
+        write_work_buffer.truncate(write_buffer.len() * T::SIZE);
+    }
+    let (write_to_file, read_from_buf) = rayon::join(
+        || {
+            if !write_buffer.is_empty() {
+                write_file.write_all(&*write_work_buffer)
+            } else {
+                Ok(())
+            }
+        },
+        || -> Result<(), io::Error> {
+            if rayon::current_num_threads() == 1 {
+                read_buffer.extend(
+                    read_work_buffer
+                        .chunks(T::SIZE)
+                        .map(|mut chunk| T::deserialize_raw(&mut chunk).unwrap()),
+                );
+                Ok(())
+            } else {
+                read_work_buffer
+                    .par_chunks(T::SIZE)
+                    .with_min_len(1 << 10)
+                    .map(|mut chunk| T::deserialize_raw(&mut chunk).unwrap())
+                    .collect_into_vec(read_buffer);
+                Ok(())
+            }
+        },
+    );
+    write_to_file?;
+    read_from_buf?;
+    Ok(())
+}
+
+pub trait RawField: SerializeRaw + DeserializeRaw + Field {}
+pub trait RawPrimeField: RawField + PrimeField {}
+
+pub trait RawAffine: SerializeRaw + DeserializeRaw + AffineRepr {}
+
+macro_rules! impl_uint {
+    ($type:ty) => {
+        impl SerializeRaw for $type {
+            #[inline(always)]
+
+            fn serialize_raw(&self, writer: &mut &mut [u8]) -> Option<()> {
+                writer.write_all(&self.to_le_bytes()).ok()
+            }
+        }
+
+        impl DeserializeRaw for $type {
+            #[inline(always)]
+            fn deserialize_raw(reader: &mut &[u8]) -> Option<Self> {
+                let mut bytes = [0u8; core::mem::size_of::<$type>()];
+                reader.read_exact(&mut bytes).ok()?;
+                Some(<$type>::from_le_bytes(bytes))
+            }
+        }
+    };
+}
+
+impl_uint!(u8);
+impl_uint!(u16);
+impl_uint!(u32);
+impl_uint!(u64);
+
+impl SerializeRaw for bool {
+    const SIZE: usize = 1;
+    #[inline(always)]
+    fn serialize_raw(&self, writer: &mut &mut [u8]) -> Option<()> {
+        writer.write_all(&[*self as u8]).ok()
+    }
+}
+
+impl DeserializeRaw for bool {
+    #[inline(always)]
+    fn deserialize_raw(reader: &mut &[u8]) -> Option<Self> {
+        let mut byte = [0u8; 1];
+        reader.read_exact(&mut byte).ok()?;
+        Some(byte[0] != 0)
+    }
+}
+
+impl SerializeRaw for usize {
+    const SIZE: usize = core::mem::size_of::<u64>();
+    #[inline(always)]
+    fn serialize_raw(&self, writer: &mut &mut [u8]) -> Option<()> {
+        writer.write_all(&(*self as u64).to_le_bytes()).ok()
+    }
+}
+
+impl DeserializeRaw for usize {
+    #[inline(always)]
+    fn deserialize_raw(reader: &mut &[u8]) -> Option<Self> {
+        let mut bytes = [0u8; core::mem::size_of::<u64>()];
+        reader.read_exact(&mut bytes).unwrap();
+        Some(<u64>::from_le_bytes(bytes) as usize)
+    }
+}
+
+impl<T: SerializeRaw, const N: usize> SerializeRaw for [T; N] {
+    const SIZE: usize = T::SIZE * N;
+
+    #[inline(always)]
+    fn serialize_raw(&self, writer: &mut &mut [u8]) -> Option<()> {
+        for item in self.iter() {
+            item.serialize_raw(writer)?;
+        }
+        Some(())
+    }
+}
+
+impl<T: DeserializeRaw + Copy, const N: usize> DeserializeRaw for [T; N] {
+    #[inline(always)]
+    fn deserialize_raw(reader: &mut &[u8]) -> Option<Self> {
+        let mut array = [MaybeUninit::uninit(); N];
+        for a in array.iter_mut().take(N) {
+            *a = MaybeUninit::new(T::deserialize_raw(reader)?);
+        }
+        Some(array.map(|item| unsafe { item.assume_init() }))
+    }
+}
+
+// Implement Serialization for tuples
+macro_rules! impl_tuple {
+    ($( $ty: ident : $no: tt, )*) => {
+        #[allow(unused)]
+        impl<$($ty, )*> SerializeRaw for ($($ty,)*) where
+            $($ty: SerializeRaw,)*
+        {
+            const SIZE: usize = {
+                0 $( + $ty::SIZE)*
+            };
+
+            #[inline(always)]
+            fn serialize_raw(&self, mut writer: &mut &mut [u8]) -> Option<()> {
+                $(self.$no.serialize_raw(&mut writer)?;)*
+                Some(())
+            }
+        }
+
+        impl<$($ty, )*> DeserializeRaw for ($($ty,)*) where
+            $($ty: DeserializeRaw,)*
+        {
+            #[inline(always)]
+
+            fn deserialize_raw(
+                #[allow(unused_variables, unused_mut)]
+                mut reader: &mut &[u8]
+            ) -> Option<Self> {
+                Some(($(
+                        $ty::deserialize_raw(&mut reader)?,
+                )*))
+            }
+        }
+    }
+}
+
+impl_tuple!();
+impl_tuple!(A:0,);
+impl_tuple!(A:0, B:1,);
+impl_tuple!(A:0, B:1, C:2,);
+impl_tuple!(A:0, B:1, C:2, D:3,);
+impl_tuple!(A:0, B:1, C:2, D:3, E:4,);
+
+impl<const N: usize> SerializeRaw for BigInt<N> {
+    const SIZE: usize = N * 8;
+    #[inline(always)]
+    fn serialize_raw(&self, writer: &mut &mut [u8]) -> Option<()> {
+        self.0.serialize_raw(writer)
+    }
+}
+
+impl<const N: usize> DeserializeRaw for BigInt<N> {
+    #[inline(always)]
+    fn deserialize_raw(reader: &mut &[u8]) -> Option<Self> {
+        <[u64; N]>::deserialize_raw(reader).map(BigInt)
+    }
+
+    fn deserialize_raw_batch(
+        result_buffer: &mut Vec<Self>,
+        work_buffer: &mut AVec,
+        batch_size: usize,
+        mut file: impl ReadN,
+    ) -> Result<(), io::Error>
+    where
+        Self: Sync + Send,
+    {
+        work_buffer.clear();
+        result_buffer.clear();
+        let size = Self::SIZE;
+        file.read_n(work_buffer, size * batch_size)?;
+        let (head, mid, tail) = unsafe { work_buffer.align_to::<BigInt<N>>() };
+        assert!(head.is_empty());
+        assert!(tail.is_empty());
+        result_buffer.extend_from_slice(mid);
+        Ok(())
+    }
+}
+
+impl<P: FpConfig<N>, const N: usize> RawField for Fp<P, N> {}
+impl<P: FpConfig<N>, const N: usize> RawPrimeField for Fp<P, N> {}
+
+impl<P: FpConfig<N>, const N: usize> SerializeRaw for Fp<P, N> {
+    const SIZE: usize = N * 8;
+
+    #[inline(always)]
+    fn serialize_raw(&self, writer: &mut &mut [u8]) -> Option<()> {
+        self.0.serialize_raw(writer)
+    }
+}
+
+impl<P: FpConfig<N>, const N: usize> DeserializeRaw for Fp<P, N> {
+    #[inline(always)]
+    fn deserialize_raw(reader: &mut &[u8]) -> Option<Self> {
+        BigInt::deserialize_raw(reader).map(|x| Fp(x, core::marker::PhantomData))
+    }
+
+    fn deserialize_raw_batch(
+        result_buffer: &mut Vec<Self>,
+        work_buffer: &mut AVec,
+        batch_size: usize,
+        mut file: impl ReadN,
+    ) -> Result<(), io::Error>
+    where
+        Self: Sync + Send,
+    {
+        work_buffer.clear();
+        result_buffer.clear();
+        let size = Self::SIZE;
+        file.read_n(work_buffer, size * batch_size)?;
+        let (head, mid, tail) = unsafe { work_buffer.align_to::<Fp<P, N>>() };
+        assert!(head.is_empty());
+        assert!(tail.is_empty());
+        result_buffer.extend_from_slice(mid);
+        Ok(())
+    }
+}
+
+// Implementations for halo2curves field types.
+// Each halo2curves Fp is repr'd as `pub struct Fp(pub [u64; N])` in Montgomery form,
+// identical in layout to ark_ff's Fp, so the same align_to batch trick applies.
+#[cfg(feature = "halo2")]
+macro_rules! impl_halo2_field {
+    ($ty:ty) => {
+        impl SerializeRaw for $ty {
+            #[inline(always)]
+            fn serialize_raw(&self, writer: &mut &mut [u8]) -> Option<()> {
+                self.0.serialize_raw(writer)
+            }
+        }
+
+        impl DeserializeRaw for $ty {
+            #[inline(always)]
+            fn deserialize_raw(reader: &mut &[u8]) -> Option<Self> {
+                const N: usize = core::mem::size_of::<$ty>() / 8;
+                <[u64; N]>::deserialize_raw(reader).map(Self)
+            }
+
+            fn deserialize_raw_batch(
+                result_buffer: &mut Vec<Self>,
+                work_buffer: &mut AVec,
+                batch_size: usize,
+                mut file: impl ReadN,
+            ) -> Result<(), io::Error>
+            where
+                Self: Sync + Send,
+            {
+                work_buffer.clear();
+                result_buffer.clear();
+                file.read_n(work_buffer, Self::SIZE * batch_size)?;
+                let (head, mid, tail) = unsafe { work_buffer.align_to::<Self>() };
+                assert!(head.is_empty());
+                assert!(tail.is_empty());
+                result_buffer.extend_from_slice(mid);
+                Ok(())
+            }
+        }
+    };
+}
+
+// secp256r1::Fp == t256::Fq, and secp256r1::Fq == t256::Fp (twin curve construction).
+#[cfg(feature = "halo2")]
+impl_halo2_field!(halo2curves::secp256r1::Fp);
+#[cfg(feature = "halo2")]
+impl_halo2_field!(halo2curves::secp256r1::Fq);
+
+impl<P: SWCurveConfig> SerializeRaw for SWAffine<P>
+where
+    P::BaseField: SerializeRaw,
+{
+    /// The size of the serialized representation of a SWAffine point.
+    /// It is calculated as (3 * BaseField::SIZE) / 2 because we
+    /// serialize a pair of points (x1, y1) and (x2, y2) together as three field elements.
+    /// Hence the size per point is 1.5 field elements.
+    const SIZE: usize = (3 * P::BaseField::SIZE) / 2;
+
+    #[inline(always)]
+    fn serialize_raw(&self, _writer: &mut &mut [u8]) -> Option<()> {
+        unimplemented!("Use serialize_raw_batch for SWAffine");
+    }
+
+    fn serialize_raw_batch(
+        result_buffer: &[Self],
+        work_buffer: &mut AVec,
+        mut file: impl crate::file_vec::WriteAligned,
+    ) -> Result<(), io::Error>
+    where
+        Self: Sync + Send + Sized,
+    {
+        if result_buffer.is_empty() {
+            return Ok(());
+        }
+        assert!(
+            result_buffer.len() % 2 == 0,
+            "SWAffine batch size must be even"
+        );
+        work_buffer.clear();
+        // We want to write pairs of points, so we reserve twice the size.
+        let n = result_buffer.len() * Self::SIZE;
+        work_buffer.reserve(n);
+
+        // Safety: `work_buffer` is empty and has capacity at least `n`.
+        unsafe {
+            work_buffer.set_len(n);
+        }
+
+        let (mut b_s, mut a_b_c_s): (Vec<_>, Vec<_>) = result_buffer
+            .par_chunks_exact(2)
+            .map(|chunk| {
+                let [p1, p2] = chunk else { unreachable!() };
+                let a = p1.x - p2.x;
+                let b = p1.y - p2.y;
+                let c = p2.x;
+                (b, [a, b, c])
+            })
+            .unzip();
+        ark_ff::batch_inversion(&mut b_s);
+        a_b_c_s
+            .par_iter_mut()
+            .zip(b_s)
+            .zip(work_buffer.par_chunks_mut(Self::SIZE * 2))
+            .for_each(|((abc, b_inv), buffer)| {
+                abc[0] *= b_inv;
+                abc.serialize_raw(&mut &mut buffer[..]).unwrap();
+            });
+        file.write_all(work_buffer)?;
+        Ok(())
+    }
+}
+
+impl<P: SWCurveConfig> DeserializeRaw for SWAffine<P>
+where
+    P::BaseField: DeserializeRaw,
+{
+    #[inline(always)]
+    fn deserialize_raw(_reader: &mut &[u8]) -> Option<Self> {
+        unimplemented!("Use deserialize_raw_batch for SWAffine");
+    }
+
+    fn deserialize_raw_batch(
+        result_buffer: &mut Vec<Self>,
+        work_buffer: &mut AVec,
+        batch_size: usize,
+        mut file: impl ReadN,
+    ) -> Result<(), io::Error>
+    where
+        Self: Sync + Send,
+    {
+        assert!(
+            batch_size % 2 == 0,
+            "SWAffine batch size must be even (pairs are compressed)"
+        );
+        let two_inv = P::BaseField::ONE.double().inverse().unwrap();
+        work_buffer.clear();
+        result_buffer.clear();
+
+        // We want to read a pair of points at a time, so we read twice the size.
+        let size = Self::SIZE * 2;
+        file.read_n(work_buffer, size * batch_size / 2)?;
+        let iter = work_buffer.par_chunks_exact(size).flat_map(|mut r| {
+            let [a, b, x2] = <[P::BaseField; 3]>::deserialize_raw(&mut r).unwrap();
+            let x1_sub_x2 = a * b;
+            let x1 = x1_sub_x2 + x2;
+            let x1_x2 = x1 * x2;
+            let y1_plus_y2 = if P::COEFF_A == P::BaseField::ZERO {
+                a * (x1_sub_x2.square() + (x1_x2).double() + x1_x2)
+            } else {
+                a * (x1_sub_x2.square() + (x1_x2).double() + x1_x2 + P::COEFF_A)
+            };
+            let y1 = (y1_plus_y2 + b) * two_inv;
+            let y2 = y1 - b;
+            [Self::new_unchecked(x1, y1), Self::new_unchecked(x2, y2)]
+        });
+        result_buffer.par_extend(iter);
+        Ok(())
+    }
+}
+
+impl<P: TECurveConfig> SerializeRaw for TEAffine<P>
+where
+    P::BaseField: SerializeRaw,
+{
+    const SIZE: usize = 2 * P::BaseField::SIZE;
+
+    #[inline(always)]
+    fn serialize_raw(&self, writer: &mut &mut [u8]) -> Option<()> {
+        self.x.serialize_raw(writer)?;
+        self.y.serialize_raw(writer)
+    }
+}
+
+impl<P: TECurveConfig> DeserializeRaw for TEAffine<P>
+where
+    P::BaseField: DeserializeRaw,
+{
+    #[inline(always)]
+    fn deserialize_raw(reader: &mut &[u8]) -> Option<Self> {
+        let x = P::BaseField::deserialize_raw(reader)?;
+        let y = P::BaseField::deserialize_raw(reader)?;
+        Some(Self::new_unchecked(x, y))
+    }
+}
+
+impl<P: SWCurveConfig> RawAffine for SWAffine<P> where P::BaseField: SerializeRaw + DeserializeRaw {}
+impl<P: TECurveConfig> RawAffine for TEAffine<P> where P::BaseField: SerializeRaw + DeserializeRaw {}
+
+#[cfg(test)]
+mod tests {
+    use crate::{BUFFER_SIZE, file_vec::backend::avec};
+
+    use super::*;
+    use ark_bls12_381::Fr;
+    use ark_std::UniformRand;
+    fn test_serialize<T: PartialEq + core::fmt::Debug + SerializeRaw + DeserializeRaw>(data: T) {
+        let mut serialized = vec![0; T::SIZE];
+        data.serialize_raw(&mut &mut serialized[..]).unwrap();
+        let de = T::deserialize_raw(&mut &serialized[..]).unwrap();
+        assert_eq!(data, de);
+    }
+
+    fn test_serialize_batch<
+        T: Sync + Send + Clone + PartialEq + core::fmt::Debug + SerializeRaw + DeserializeRaw,
+    >(
+        data: &[T],
+    ) {
+        let size = T::SIZE;
+        let mut serialized = avec![0u8; size * data.len()];
+        let mut buffer = serialized.clone();
+        T::serialize_raw_batch(data, &mut buffer, &mut serialized[..]).unwrap();
+        let mut final_result = vec![];
+        let mut result_buf = vec![];
+        let mut buffer_2 = avec![];
+        buffer_2.extend_from_slice(&buffer);
+        while final_result.len() < data.len() {
+            T::deserialize_raw_batch(
+                &mut result_buf,
+                &mut buffer_2,
+                BUFFER_SIZE,
+                &serialized[(final_result.len() * size)..],
+            )
+            .unwrap();
+            buffer_2.clear();
+            final_result.extend(result_buf.drain(..));
+            result_buf.clear();
+        }
+        assert_eq!(&data, &final_result);
+    }
+
+    #[test]
+    fn test_uint() {
+        test_serialize(192830918usize);
+        test_serialize(192830918u64);
+        test_serialize(192830918u32);
+        test_serialize(22313u16);
+        test_serialize(123u8);
+        let mut rng = ark_std::test_rng();
+        for size in [1, 2, 4, 8, 16] {
+            let data = (0..size).map(|_| u8::rand(&mut rng)).collect::<Vec<_>>();
+            test_serialize_batch(&data);
+        }
+    }
+    #[test]
+    fn test_array() {
+        test_serialize([1u64, 2, 3, 4, 5]);
+        test_serialize([1u8; 33]);
+        let mut rng = ark_std::test_rng();
+        for size in [1, 2, 4, 8, 16] {
+            let data = (0..size)
+                .map(|_| [u64::rand(&mut rng); 10])
+                .collect::<Vec<_>>();
+            test_serialize_batch(&data);
+        }
+    }
+
+    #[test]
+    fn test_field() {
+        let mut rng = ark_std::test_rng();
+        for _ in 0..100 {
+            test_serialize(Fr::rand(&mut rng));
+        }
+        for size in [1, 2, 4, 8, 16] {
+            let data = (0..(BUFFER_SIZE * size))
+                .map(|_| Fr::rand(&mut rng))
+                .collect::<Vec<_>>();
+            test_serialize_batch(&data);
+        }
+    }
+}

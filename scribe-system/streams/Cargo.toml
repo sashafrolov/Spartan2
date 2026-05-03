@@ -1,0 +1,48 @@
+[package]
+name = "scribe-streams"
+version.workspace = true
+authors.workspace = true
+categories.workspace = true
+include.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[dependencies]
+ark-ec = { workspace = true }
+ark-ff = { workspace = true }
+ark-std = { workspace = true }
+ark-poly = { workspace = true }
+ark-serialize = { workspace = true }
+
+rayon = { workspace = true }
+derivative = { workspace = true }
+
+halo2curves = { version = "0.9.0", optional = true }
+
+tempfile = "3.3.0"
+smallvec = "1.6"
+libc = { version = "0.2.101" }
+aligned-vec = { version = "0.6.1" }
+crossbeam = { version = "0.8" }
+
+[features]
+halo2 = ["dep:halo2curves"]
+
+[dev-dependencies]
+ark-bls12-381 = { version = "0.5.0", default-features = false, features = [ "curve" ] }
+criterion = { version = "0.6", default-features = false, features = [ "cargo_bench_support" ]}
+
+[[bench]]
+name = "file_vec"
+path = "benches/file_vec.rs"
+harness = false
+
+[[bench]]
+name = "iter"
+path = "benches/iter.rs"
+harness = false
+
+[[bench]]
+name = "serialize"
+path = "benches/serialize.rs"
+harness = false

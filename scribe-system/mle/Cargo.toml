@@ -1,0 +1,35 @@
+[package]
+name = "mle"
+version.workspace = true
+authors.workspace = true
+categories.workspace = true
+include.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[dependencies]
+ark-ec = { workspace = true, default-features = false, features = ["parallel"] }
+ark-ff = { workspace = true, default-features = false, features = ["parallel"] }
+ark-std = { workspace = true, default-features = false, features = ["parallel"] }
+ark-poly = { workspace = true, default-features = false, features = ["parallel"] }
+ark-serialize = { workspace = true, features = ["derive", "std"]}
+scribe-streams = { path = "../streams" }
+tempfile = "3.3.0"
+merlin = "3.0.0"
+smallvec = "1.6"
+rayon = { version = "1.5.2", default-features = false }
+derivative = { version = "2", features = ["use_core"] }
+libc = { version = "0.2.101" }
+
+
+[target.'cfg(target_os = "linux")'.dependencies]
+aligned-vec = { version = "0.6.1" }
+
+[dev-dependencies]
+ark-bls12-381 = { workspace = true, default-features = false, features = [ "curve" ] }
+criterion = { version = "0.6", default-features = false, features = [ "cargo_bench_support" ]}
+
+[[bench]]
+name = "mle"
+path = "benches/mle.rs"
+harness = false

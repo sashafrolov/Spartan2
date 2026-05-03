@@ -1,0 +1,479 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A237526F2E5D83E2009F2E20 /* hp_srs_22.params in Resources */ = {isa = PBXBuildFile; fileRef = A23752622E5D83E2009F2E20 /* hp_srs_22.params */; };
+		A23752702E5D83E2009F2E20 /* scribe_pk_22.params in Resources */ = {isa = PBXBuildFile; fileRef = A237526A2E5D83E2009F2E20 /* scribe_pk_22.params */; };
+		A23752712E5D83E2009F2E20 /* scribe_srs_25.params in Resources */ = {isa = PBXBuildFile; fileRef = A237526E2E5D83E2009F2E20 /* scribe_srs_25.params */; };
+		A23752722E5D83E2009F2E20 /* scribe_pk_19.params in Resources */ = {isa = PBXBuildFile; fileRef = A23752672E5D83E2009F2E20 /* scribe_pk_19.params */; };
+		A23752732E5D83E2009F2E20 /* scribe_pk_17.params in Resources */ = {isa = PBXBuildFile; fileRef = A23752652E5D83E2009F2E20 /* scribe_pk_17.params */; };
+		A23752742E5D83E2009F2E20 /* scribe_pk_21.params in Resources */ = {isa = PBXBuildFile; fileRef = A23752692E5D83E2009F2E20 /* scribe_pk_21.params */; };
+		A23752752E5D83E2009F2E20 /* scribe_pk_16.params in Resources */ = {isa = PBXBuildFile; fileRef = A23752642E5D83E2009F2E20 /* scribe_pk_16.params */; };
+		A23752762E5D83E2009F2E20 /* scribe_pk_18.params in Resources */ = {isa = PBXBuildFile; fileRef = A23752662E5D83E2009F2E20 /* scribe_pk_18.params */; };
+		A23752772E5D83E2009F2E20 /* scribe_pk_25.params in Resources */ = {isa = PBXBuildFile; fileRef = A237526D2E5D83E2009F2E20 /* scribe_pk_25.params */; };
+		A23752782E5D83E2009F2E20 /* scribe_pk_15.params in Resources */ = {isa = PBXBuildFile; fileRef = A23752632E5D83E2009F2E20 /* scribe_pk_15.params */; };
+		A23752792E5D83E2009F2E20 /* scribe_pk_23.params in Resources */ = {isa = PBXBuildFile; fileRef = A237526B2E5D83E2009F2E20 /* scribe_pk_23.params */; };
+		A237527A2E5D83E2009F2E20 /* scribe_pk_24.params in Resources */ = {isa = PBXBuildFile; fileRef = A237526C2E5D83E2009F2E20 /* scribe_pk_24.params */; };
+		A237527B2E5D83E2009F2E20 /* scribe_pk_20.params in Resources */ = {isa = PBXBuildFile; fileRef = A23752682E5D83E2009F2E20 /* scribe_pk_20.params */; };
+		A2B6CD122C91316F00F6D105 /* ScribeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2B6CD112C91316F00F6D105 /* ScribeApp.swift */; };
+		A2B6CD182C91317000F6D105 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A2B6CD172C91317000F6D105 /* Assets.xcassets */; };
+		A2B6CD1B2C91317000F6D105 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A2B6CD1A2C91317000F6D105 /* Preview Assets.xcassets */; };
+		A2B6CD262C91331100F6D105 /* FfiBenchUtils.h in Headers */ = {isa = PBXBuildFile; fileRef = A2B6CD252C91331100F6D105 /* FfiBenchUtils.h */; };
+		A2B6CD342C93579F00F6D105 /* libbench_utils.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A2B6CD332C93579F00F6D105 /* libbench_utils.a */; };
+		A2B6CD362C9357AB00F6D105 /* libbench_utils.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A2B6CD352C9357AB00F6D105 /* libbench_utils.a */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		A23752622E5D83E2009F2E20 /* hp_srs_22.params */ = {isa = PBXFileReference; lastKnownFileType = file; name = hp_srs_22.params; path = "../bench-utils/examples/setup_ios/hp_srs_22.params"; sourceTree = SOURCE_ROOT; };
+		A23752632E5D83E2009F2E20 /* scribe_pk_15.params */ = {isa = PBXFileReference; lastKnownFileType = file; name = scribe_pk_15.params; path = "../bench-utils/examples/setup_ios/scribe_pk_15.params"; sourceTree = SOURCE_ROOT; };
+		A23752642E5D83E2009F2E20 /* scribe_pk_16.params */ = {isa = PBXFileReference; lastKnownFileType = file; name = scribe_pk_16.params; path = "../bench-utils/examples/setup_ios/scribe_pk_16.params"; sourceTree = SOURCE_ROOT; };
+		A23752652E5D83E2009F2E20 /* scribe_pk_17.params */ = {isa = PBXFileReference; lastKnownFileType = file; name = scribe_pk_17.params; path = "../bench-utils/examples/setup_ios/scribe_pk_17.params"; sourceTree = SOURCE_ROOT; };
+		A23752662E5D83E2009F2E20 /* scribe_pk_18.params */ = {isa = PBXFileReference; lastKnownFileType = file; name = scribe_pk_18.params; path = "../bench-utils/examples/setup_ios/scribe_pk_18.params"; sourceTree = SOURCE_ROOT; };
+		A23752672E5D83E2009F2E20 /* scribe_pk_19.params */ = {isa = PBXFileReference; lastKnownFileType = file; name = scribe_pk_19.params; path = "../bench-utils/examples/setup_ios/scribe_pk_19.params"; sourceTree = SOURCE_ROOT; };
+		A23752682E5D83E2009F2E20 /* scribe_pk_20.params */ = {isa = PBXFileReference; lastKnownFileType = file; name = scribe_pk_20.params; path = "../bench-utils/examples/setup_ios/scribe_pk_20.params"; sourceTree = SOURCE_ROOT; };
+		A23752692E5D83E2009F2E20 /* scribe_pk_21.params */ = {isa = PBXFileReference; lastKnownFileType = file; name = scribe_pk_21.params; path = "../bench-utils/examples/setup_ios/scribe_pk_21.params"; sourceTree = SOURCE_ROOT; };
+		A237526A2E5D83E2009F2E20 /* scribe_pk_22.params */ = {isa = PBXFileReference; lastKnownFileType = file; name = scribe_pk_22.params; path = "../bench-utils/examples/setup_ios/scribe_pk_22.params"; sourceTree = SOURCE_ROOT; };
+		A237526B2E5D83E2009F2E20 /* scribe_pk_23.params */ = {isa = PBXFileReference; lastKnownFileType = file; name = scribe_pk_23.params; path = "../bench-utils/examples/setup_ios/scribe_pk_23.params"; sourceTree = SOURCE_ROOT; };
+		A237526C2E5D83E2009F2E20 /* scribe_pk_24.params */ = {isa = PBXFileReference; lastKnownFileType = file; name = scribe_pk_24.params; path = "../bench-utils/examples/setup_ios/scribe_pk_24.params"; sourceTree = SOURCE_ROOT; };
+		A237526D2E5D83E2009F2E20 /* scribe_pk_25.params */ = {isa = PBXFileReference; lastKnownFileType = file; name = scribe_pk_25.params; path = "../bench-utils/examples/setup_ios/scribe_pk_25.params"; sourceTree = SOURCE_ROOT; };
+		A237526E2E5D83E2009F2E20 /* scribe_srs_25.params */ = {isa = PBXFileReference; lastKnownFileType = file; name = scribe_srs_25.params; path = "../bench-utils/examples/setup_ios/scribe_srs_25.params"; sourceTree = SOURCE_ROOT; };
+		A2B6CD0E2C91316F00F6D105 /* mobile-scribe.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "mobile-scribe.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		A2B6CD112C91316F00F6D105 /* ScribeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScribeApp.swift; sourceTree = "<group>"; };
+		A2B6CD172C91317000F6D105 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		A2B6CD1A2C91317000F6D105 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
+		A2B6CD222C91321200F6D105 /* libbench_utils.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libbench_utils.a; path = "../target/aarch64-apple-ios/release/libbench_utils.a"; sourceTree = "<group>"; };
+		A2B6CD252C91331100F6D105 /* FfiBenchUtils.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = FfiBenchUtils.h; sourceTree = "<group>"; };
+		A2B6CD332C93579F00F6D105 /* libbench_utils.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libbench_utils.a; path = ../target/universal/release/libbench_utils.a; sourceTree = "<group>"; };
+		A2B6CD352C9357AB00F6D105 /* libbench_utils.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libbench_utils.a; path = ../target/universal/debug/libbench_utils.a; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A2B6CD0B2C91316F00F6D105 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A2B6CD362C9357AB00F6D105 /* libbench_utils.a in Frameworks */,
+				A2B6CD342C93579F00F6D105 /* libbench_utils.a in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A2B6CD052C91316F00F6D105 = {
+			isa = PBXGroup;
+			children = (
+				A2B6CD252C91331100F6D105 /* FfiBenchUtils.h */,
+				A2B6CD102C91316F00F6D105 /* mobile-scribe */,
+				A2B6CD0F2C91316F00F6D105 /* Products */,
+				A2B6CD212C91321200F6D105 /* Frameworks */,
+			);
+			sourceTree = "<group>";
+		};
+		A2B6CD0F2C91316F00F6D105 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A2B6CD0E2C91316F00F6D105 /* mobile-scribe.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		A2B6CD102C91316F00F6D105 /* mobile-scribe */ = {
+			isa = PBXGroup;
+			children = (
+				A2B6CD112C91316F00F6D105 /* ScribeApp.swift */,
+				A23752622E5D83E2009F2E20 /* hp_srs_22.params */,
+				A23752632E5D83E2009F2E20 /* scribe_pk_15.params */,
+				A23752642E5D83E2009F2E20 /* scribe_pk_16.params */,
+				A23752652E5D83E2009F2E20 /* scribe_pk_17.params */,
+				A23752662E5D83E2009F2E20 /* scribe_pk_18.params */,
+				A23752672E5D83E2009F2E20 /* scribe_pk_19.params */,
+				A23752682E5D83E2009F2E20 /* scribe_pk_20.params */,
+				A23752692E5D83E2009F2E20 /* scribe_pk_21.params */,
+				A237526A2E5D83E2009F2E20 /* scribe_pk_22.params */,
+				A237526B2E5D83E2009F2E20 /* scribe_pk_23.params */,
+				A237526C2E5D83E2009F2E20 /* scribe_pk_24.params */,
+				A237526D2E5D83E2009F2E20 /* scribe_pk_25.params */,
+				A237526E2E5D83E2009F2E20 /* scribe_srs_25.params */,
+				A2B6CD172C91317000F6D105 /* Assets.xcassets */,
+				A2B6CD192C91317000F6D105 /* Preview Content */,
+			);
+			path = "mobile-scribe";
+			sourceTree = "<group>";
+		};
+		A2B6CD192C91317000F6D105 /* Preview Content */ = {
+			isa = PBXGroup;
+			children = (
+				A2B6CD1A2C91317000F6D105 /* Preview Assets.xcassets */,
+			);
+			path = "Preview Content";
+			sourceTree = "<group>";
+		};
+		A2B6CD212C91321200F6D105 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				A2B6CD352C9357AB00F6D105 /* libbench_utils.a */,
+				A2B6CD332C93579F00F6D105 /* libbench_utils.a */,
+				A2B6CD222C91321200F6D105 /* libbench_utils.a */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXHeadersBuildPhase section */
+		A2B6CD242C91322300F6D105 /* Headers */ = {
+			isa = PBXHeadersBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A2B6CD262C91331100F6D105 /* FfiBenchUtils.h in Headers */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXHeadersBuildPhase section */
+
+/* Begin PBXNativeTarget section */
+		A2B6CD0D2C91316F00F6D105 /* mobile-scribe */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A2B6CD1E2C91317000F6D105 /* Build configuration list for PBXNativeTarget "mobile-scribe" */;
+			buildPhases = (
+				A2B6CD242C91322300F6D105 /* Headers */,
+				A2B6CD312C93537C00F6D105 /* Build Rust Static Libraries */,
+				A2B6CD0A2C91316F00F6D105 /* Sources */,
+				A2B6CD0B2C91316F00F6D105 /* Frameworks */,
+				A2B6CD0C2C91316F00F6D105 /* Resources */,
+				A2B6CD322C93565A00F6D105 /* Delete Rust Libraries to force recompilation */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "mobile-scribe";
+			productName = "mobile-scribe";
+			productReference = A2B6CD0E2C91316F00F6D105 /* mobile-scribe.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A2B6CD062C91316F00F6D105 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1540;
+				LastUpgradeCheck = 1540;
+				TargetAttributes = {
+					A2B6CD0D2C91316F00F6D105 = {
+						CreatedOnToolsVersion = 15.4;
+					};
+				};
+			};
+			buildConfigurationList = A2B6CD092C91316F00F6D105 /* Build configuration list for PBXProject "mobile-scribe" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = A2B6CD052C91316F00F6D105;
+			productRefGroup = A2B6CD0F2C91316F00F6D105 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A2B6CD0D2C91316F00F6D105 /* mobile-scribe */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		A2B6CD0C2C91316F00F6D105 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A237526F2E5D83E2009F2E20 /* hp_srs_22.params in Resources */,
+				A23752702E5D83E2009F2E20 /* scribe_pk_22.params in Resources */,
+				A23752712E5D83E2009F2E20 /* scribe_srs_25.params in Resources */,
+				A23752722E5D83E2009F2E20 /* scribe_pk_19.params in Resources */,
+				A23752732E5D83E2009F2E20 /* scribe_pk_17.params in Resources */,
+				A23752742E5D83E2009F2E20 /* scribe_pk_21.params in Resources */,
+				A23752752E5D83E2009F2E20 /* scribe_pk_16.params in Resources */,
+				A23752762E5D83E2009F2E20 /* scribe_pk_18.params in Resources */,
+				A23752772E5D83E2009F2E20 /* scribe_pk_25.params in Resources */,
+				A23752782E5D83E2009F2E20 /* scribe_pk_15.params in Resources */,
+				A23752792E5D83E2009F2E20 /* scribe_pk_23.params in Resources */,
+				A237527A2E5D83E2009F2E20 /* scribe_pk_24.params in Resources */,
+				A237527B2E5D83E2009F2E20 /* scribe_pk_20.params in Resources */,
+				A2B6CD1B2C91317000F6D105 /* Preview Assets.xcassets in Resources */,
+				A2B6CD182C91317000F6D105 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		A2B6CD312C93537C00F6D105 /* Build Rust Static Libraries */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Build Rust Static Libraries";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(PROJECT_DIR)/../target/universal/$(CONFIGURATION:lower)/libbench_utils.a",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "# Type a script or drag a script file from your workspace to insert its path.\n# The $PATH used by Xcode likely won't contain Cargo, fix that.\n# This assumes a default `rustup` setup.\nexport PATH=\"$HOME/.cargo/bin:$PATH\"\nexport PATH=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/lib:$PATH\nexport LIBRARY_PATH=\"$LIBRARY_PATH:/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/lib\" # Needed for Rust compilation and linking\n\n# --xcode-integ determines --release and --targets from Xcode's env vars.\n# Depending your setup, specify the rustup toolchain explicitly.\ncargo +nightly lipo --xcode-integ --manifest-path ../Cargo.toml --features gemini\n";
+		};
+		A2B6CD322C93565A00F6D105 /* Delete Rust Libraries to force recompilation */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Delete Rust Libraries to force recompilation";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "# Delete the built libraries that were just linked.\n# If this isn't done, XCode won't try to rebuild them\n# by running the build scripts, because it won't think\n# they are out of date.\nrm -fv ../target/universal/*/*.a\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A2B6CD0A2C91316F00F6D105 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A2B6CD122C91316F00F6D105 /* ScribeApp.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		A2B6CD1C2C91317000F6D105 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.5;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		A2B6CD1D2C91317000F6D105 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.5;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		A2B6CD1F2C91317000F6D105 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "\"mobile-scribe/Preview Content\"";
+				DEVELOPMENT_TEAM = J25MPRWS8K;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = "$(PROJECT_DIR)/../target/universal/$(CONFIGURATION:lower)";
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "pratyush.mobile-scribe";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				"SWIFT_OBJC_BRIDGING_HEADER[sdk=iphoneos*]" = "$(SRCROOT)/FfiBenchUtils.h";
+				"SWIFT_OBJC_BRIDGING_HEADER[sdk=iphonesimulator*]" = "$(SRCROOT)/FfiBenchUtils.h";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		A2B6CD202C91317000F6D105 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "\"mobile-scribe/Preview Content\"";
+				DEVELOPMENT_TEAM = J25MPRWS8K;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = "$(PROJECT_DIR)/../target/universal/$(CONFIGURATION:lower)";
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "pratyush.mobile-scribe";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				"SWIFT_OBJC_BRIDGING_HEADER[sdk=iphoneos*]" = "$(SRCROOT)/FfiBenchUtils.h";
+				"SWIFT_OBJC_BRIDGING_HEADER[sdk=iphonesimulator*]" = "$(SRCROOT)/FfiBenchUtils.h";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A2B6CD092C91316F00F6D105 /* Build configuration list for PBXProject "mobile-scribe" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A2B6CD1C2C91317000F6D105 /* Debug */,
+				A2B6CD1D2C91317000F6D105 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A2B6CD1E2C91317000F6D105 /* Build configuration list for PBXNativeTarget "mobile-scribe" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A2B6CD1F2C91317000F6D105 /* Debug */,
+				A2B6CD202C91317000F6D105 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = A2B6CD062C91316F00F6D105 /* Project object */;
+}
