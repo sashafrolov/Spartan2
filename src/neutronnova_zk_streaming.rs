@@ -844,7 +844,7 @@ where
             let R1CSWitness { W: _, r_W, is_small } = witness;
             // TODO: Make this stylistically look like Pratyush's code. 
             // TODO: should be able to do a non-owning iter and move it up to get a bit more interleaving.
-            let w_fv = scribe_streams::file_vec::FileVec::new();
+            let w_fv = from_iter(W.into_iter()).to_file_vec();
 
             Ok((split_instance, is_small, r_W, w_fv, regular_instance, av_fv, bv_fv, cv_fv))
           })
