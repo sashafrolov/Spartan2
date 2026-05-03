@@ -841,7 +841,7 @@ where
             let (av_fv, bv_fv, cv_fv) =
               from_iter(pk.S_step.multiply_vec_iter(&z)?).unzip3();
 
-            let R1CSWitness { W: _, r_W, is_small } = witness;
+            let R1CSWitness { W, r_W, is_small } = witness;
             // TODO: Make this stylistically look like Pratyush's code. 
             // TODO: should be able to do a non-owning iter and move it up to get a bit more interleaving.
             let w_fv = from_iter(W.into_iter()).to_file_vec();
