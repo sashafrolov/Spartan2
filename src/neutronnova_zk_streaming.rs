@@ -880,7 +880,7 @@ where
       .args(["-sk", "/tmp"])
       .output();
     if let Ok(out) = du_out {
-      print!("{}", String::from_utf8_lossy(&out.stdout));
+      info!(output = %String::from_utf8_lossy(&out.stdout), "du_tmp");
     }
 
     // Unpack step results and pad A/B/C layers to n_padded (cloning from index 0).

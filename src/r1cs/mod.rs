@@ -21,7 +21,10 @@ use core::cmp::max;
 use ff::{Field, PrimeField};
 use once_cell::sync::OnceCell;
 use rayon::prelude::*;
+use scribe_streams::iterator::BatchedIterator;
 use serde::{Deserialize, Serialize};
+
+const FOLD_MULTIPLE_CHUNK_SIZE: usize = 4;
 
 mod folds;
 mod sparse;
@@ -684,8 +687,31 @@ impl<E: Engine> R1CSWitness<E> {
       });
     }
 
-    let Ws_vecs: Vec<Vec<E::Scalar>> = Ws_W.par_iter()
-      .map(|fv| scribe_streams::file_vec::FileVec::clone(fv).into_vec())
+    // Reduce Ws_W in chunks to avoid loading all witnesses into memory simultaneously.
+    // Each chunk of FileVecs is zipped together and reduced to a single Vec<E::Scalar>
+    // via weighted accumulation, then the per-chunk results are summed.
+    let reduced_chunk_vectors: Vec<Vec<E::Scalar>> = Ws_W
+      .chunks(FOLD_MULTIPLE_CHUNK_SIZE)
+      .enumerate()
+      .map(|(chunk_idx, chunk)| {
+        let w_offset = chunk_idx * FOLD_MULTIPLE_CHUNK_SIZE;
+        let chunk_weights: Vec<E::Scalar> = w[w_offset..w_offset + chunk.len()].to_vec();
+        let iters: Vec<_> = chunk.iter().map(|fv| fv.iter()).collect();
+        scribe_streams::iterator::zip_many(iters)
+          .map(move |vals: scribe_streams::iterator::zip_many::SVec<E::Scalar>| {
+            type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
+            let mut acc = Acc::<E::Scalar>::default();
+            for (k, v) in vals.iter().enumerate() {
+              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+                &mut acc,
+                &chunk_weights[k],
+                v,
+              );
+            }
+            <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc)
+          })
+          .to_vec()
+      })
       .collect();
 
     let mut acc_W = vec![E::Scalar::ZERO; dim];
@@ -696,18 +722,12 @@ impl<E: Engine> R1CSWitness<E> {
       .enumerate()
       .for_each(|(block_idx, acc_blk)| {
         let start = block_idx * tile;
-
-        type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
         for (j, acc_blk_j) in acc_blk.iter_mut().enumerate() {
-          let mut acc = Acc::<E::Scalar>::default();
-          for (i, &wi) in w.iter().enumerate() {
-            <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-              &mut acc,
-              &wi,
-              &Ws_vecs[i][start + j],
-            );
+          let mut sum = E::Scalar::ZERO;
+          for chunk_vec in &reduced_chunk_vectors {
+            sum += chunk_vec[start + j];
           }
-          *acc_blk_j = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc);
+          *acc_blk_j = sum;
         }
       });
 
