@@ -86,6 +86,10 @@ fn suffix_weight_full<F: Field>(t: usize, ell_b: usize, pair_idx: usize, rhos: &
   w
 }
 
+// Once fewer than this many NIFS rounds remain, the layers fit in RAM and we switch
+// from FileVec-based folds to in-memory Vec folds.
+const FIRST_IN_MEMORY_NIFS_ROUND: usize = 6;
+
 impl<E: Engine> NeutronNovaNIFS<E>
 where
   E::PCS: FoldingEngineTrait<E>,
@@ -209,6 +213,105 @@ where
       c.swap(2 * j, 4 * j);
       c.swap(2 * j + 1, 4 * j + 2);
     }
+  }
+
+  /// In-memory variant of compact_folded_layers_abc for Vec layers.
+  fn compact_folded_layers_abc_mem(
+    a: &mut [Vec<E::Scalar>],
+    b: &mut [Vec<E::Scalar>],
+    c: &mut [Vec<E::Scalar>],
+    prove_pairs: usize,
+  ) {
+    for j in 0..prove_pairs {
+      a.swap(2 * j, 4 * j);
+      a.swap(2 * j + 1, 4 * j + 2);
+      b.swap(2 * j, 4 * j);
+      b.swap(2 * j + 1, 4 * j + 2);
+      c.swap(2 * j, 4 * j);
+      c.swap(2 * j + 1, 4 * j + 2);
+    }
+  }
+
+  /// In-memory prove_helper operating on Vec<E::Scalar> slices instead of FileVecs.
+  /// Used for the final FIRST_IN_MEMORY_NIFS_ROUND rounds once data fits in RAM.
+  #[inline(always)]
+  #[allow(clippy::needless_range_loop)]
+  fn prove_helper_mem(
+    round: usize,
+    (left, right): (usize, usize),
+    e: &[E::Scalar],
+    Az1: &[E::Scalar],
+    Bz1: &[E::Scalar],
+    Cz1: &[E::Scalar],
+    Az2: &[E::Scalar],
+    Bz2: &[E::Scalar],
+  ) -> (E::Scalar, E::Scalar) {
+    type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
+
+    assert_eq!(e.len(), left + right);
+    assert_eq!(Az1.len(), left * right);
+
+    let f = &e[left..];
+    let e_left = &e[..left];
+    let compute_e0 = round != 0;
+
+    let mut acc_e0 = Acc::<E::Scalar>::default();
+    let mut acc_quad = Acc::<E::Scalar>::default();
+
+    for i in 0..right {
+      let base = i * left;
+      let mut inner_e0 = Acc::<E::Scalar>::default();
+      let mut inner_quad = Acc::<E::Scalar>::default();
+
+      if compute_e0 {
+        for j in 0..left {
+          let k = base + j;
+          let inner_val = Az1[k] * Bz1[k] - Cz1[k];
+          <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+            &mut inner_e0,
+            &e_left[j],
+            &inner_val,
+          );
+          let az_diff = Az2[k] - Az1[k];
+          let bz_diff = Bz2[k] - Bz1[k];
+          <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+            &mut inner_quad,
+            &e_left[j],
+            &(az_diff * bz_diff),
+          );
+        }
+      } else {
+        for j in 0..left {
+          let k = base + j;
+          let az_diff = Az2[k] - Az1[k];
+          let bz_diff = Bz2[k] - Bz1[k];
+          <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+            &mut inner_quad,
+            &e_left[j],
+            &(az_diff * bz_diff),
+          );
+        }
+      }
+
+      let inner_e0_red = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_e0);
+      let inner_quad_red = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_quad);
+
+      <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+        &mut acc_e0,
+        &f[i],
+        &inner_e0_red,
+      );
+      <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+        &mut acc_quad,
+        &f[i],
+        &inner_quad_red,
+      );
+    }
+
+    (
+      <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_e0),
+      <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_quad),
+    )
   }
 
   /// ZK version of NeutronNova NIFS prove. This function performs the NIFS folding
@@ -361,6 +464,7 @@ where
       }};
     }
 
+    let (_nifs_main_sumcheck_span, nifs_main_sumcheck_t) = start_span!("nifs_main_sumcheck");
     // Round 0: prove_helper
     {
       let pairs = m / 2;
@@ -400,11 +504,28 @@ where
       }
     }
 
-    // Rounds 1..ell_b-1: merged fold(prev round) + prove_helper(current round)
+    // Rounds 1..ell_b-1: merged fold(prev round) + prove_helper(current round).
+    // Phases:
+    //   1. Pure FileVec rounds (1 .. intermediate_t-1): same as before.
+    //   2. Intermediate round (intermediate_t): folds FileVecs but writes results to
+    //      in-memory Vecs, avoiding future disk I/O for the remaining rounds.
+    //   3. In-memory rounds (intermediate_t+1 .. ell_b-1): all in RAM.
+    // When ell_b <= FIRST_IN_MEMORY_NIFS_ROUND+1, intermediate_t=1 so phase 1 is empty.
+    let mut A_layers_mem: Vec<Vec<E::Scalar>> = Vec::new();
+    let mut B_layers_mem: Vec<Vec<E::Scalar>> = Vec::new();
+    let mut C_layers_mem: Vec<Vec<E::Scalar>> = Vec::new();
+
     if ell_b > 1 {
       let mut prev_r_b = r_bs[0];
 
-      for t in 1..ell_b {
+      let intermediate_t = if ell_b > FIRST_IN_MEMORY_NIFS_ROUND + 1 {
+        ell_b - FIRST_IN_MEMORY_NIFS_ROUND - 1
+      } else {
+        1
+      };
+
+      // Phase 1: pure FileVec rounds.
+      for t in 1..intermediate_t {
         let fold_pairs = m / 2;
         let prove_pairs = fold_pairs / 2;
         let mut e0_acc = E::Scalar::ZERO;
@@ -424,7 +545,6 @@ where
             .zip(c_head.par_chunks_mut(4))
             .enumerate()
             .map(|(j, ((a_chunk, b_chunk), c_chunk))| {
-              // Fold [0] += r * ([1] - [0]) and [2] += r * ([3] - [2]) for A, B, C
               for chunk in [&mut *a_chunk, &mut *b_chunk, &mut *c_chunk] {
                 {
                   let (lo, hi) = chunk.split_at_mut(1);
@@ -439,7 +559,6 @@ where
                   }).to_file_vec();
                 }
               }
-              // Prove from folded positions [0] and [2]
               let (e0, qc) = Self::prove_helper(
                 t,
                 (left, right),
@@ -460,7 +579,6 @@ where
           e0_acc += e0_sum;
           quad_acc += qc_sum;
 
-          // Compact folded results from positions [4j, 4j+2] into [2j, 2j+1]
           Self::compact_folded_layers_abc(&mut A_layers, &mut B_layers, &mut C_layers, prove_pairs);
 
           for i in (2 * prove_pairs)..fold_pairs {
@@ -475,14 +593,214 @@ where
         prev_r_b = finish_round!(t, e0_acc, quad_acc);
       }
 
-      // Final fold: fold remaining A/B/C layers
+      // Phase 2: intermediate round — reads FileVecs, writes in-memory Vecs.
+      {
+        let t = intermediate_t;
+        let fold_pairs = m / 2;
+        let prove_pairs = fold_pairs / 2;
+        let mut e0_acc = E::Scalar::ZERO;
+        let mut quad_acc = E::Scalar::ZERO;
+
+        A_layers_mem = vec![Vec::new(); fold_pairs];
+        B_layers_mem = vec![Vec::new(); fold_pairs];
+        C_layers_mem = vec![Vec::new(); fold_pairs];
+
+        {
+          let e_eq_ref = &E_eq;
+          let rhos_ref = &rhos;
+
+          let (a_head, _) = A_layers.split_at_mut(4 * prove_pairs);
+          let (b_head, _) = B_layers.split_at_mut(4 * prove_pairs);
+          let (c_head, _) = C_layers.split_at_mut(4 * prove_pairs);
+
+          // Fold each group of 4 FileVecs into 2 in-memory Vecs, then prove.
+          let chunk_results: Vec<(
+            E::Scalar, E::Scalar, usize,
+            Vec<E::Scalar>, Vec<E::Scalar>,
+            Vec<E::Scalar>, Vec<E::Scalar>,
+            Vec<E::Scalar>, Vec<E::Scalar>,
+          )> = a_head
+            .par_chunks_mut(4)
+            .zip(b_head.par_chunks_mut(4))
+            .zip(c_head.par_chunks_mut(4))
+            .enumerate()
+            .map(|(j, ((a_chunk, b_chunk), c_chunk))| {
+              let a0_lo = std::mem::take(&mut a_chunk[0]).into_vec();
+              let a0_hi = std::mem::take(&mut a_chunk[1]).into_vec();
+              let a0: Vec<E::Scalar> = a0_lo.iter().zip(a0_hi.iter())
+                .map(|(l, h)| *l + prev_r_b * (*h - *l)).collect();
+              let a2_lo = std::mem::take(&mut a_chunk[2]).into_vec();
+              let a2_hi = std::mem::take(&mut a_chunk[3]).into_vec();
+              let a2: Vec<E::Scalar> = a2_lo.iter().zip(a2_hi.iter())
+                .map(|(l, h)| *l + prev_r_b * (*h - *l)).collect();
+
+              let b0_lo = std::mem::take(&mut b_chunk[0]).into_vec();
+              let b0_hi = std::mem::take(&mut b_chunk[1]).into_vec();
+              let b0: Vec<E::Scalar> = b0_lo.iter().zip(b0_hi.iter())
+                .map(|(l, h)| *l + prev_r_b * (*h - *l)).collect();
+              let b2_lo = std::mem::take(&mut b_chunk[2]).into_vec();
+              let b2_hi = std::mem::take(&mut b_chunk[3]).into_vec();
+              let b2: Vec<E::Scalar> = b2_lo.iter().zip(b2_hi.iter())
+                .map(|(l, h)| *l + prev_r_b * (*h - *l)).collect();
+
+              let c0_lo = std::mem::take(&mut c_chunk[0]).into_vec();
+              let c0_hi = std::mem::take(&mut c_chunk[1]).into_vec();
+              let c0: Vec<E::Scalar> = c0_lo.iter().zip(c0_hi.iter())
+                .map(|(l, h)| *l + prev_r_b * (*h - *l)).collect();
+              let c2_lo = std::mem::take(&mut c_chunk[2]).into_vec();
+              let c2_hi = std::mem::take(&mut c_chunk[3]).into_vec();
+              let c2: Vec<E::Scalar> = c2_lo.iter().zip(c2_hi.iter())
+                .map(|(l, h)| *l + prev_r_b * (*h - *l)).collect();
+
+              let (e0, qc) = Self::prove_helper_mem(
+                t, (left, right), e_eq_ref,
+                &a0, &b0, &c0, &a2, &b2,
+              );
+              let w = suffix_weight_full::<E::Scalar>(t, ell_b, j, rhos_ref);
+              (e0 * w, qc * w, j, a0, a2, b0, b2, c0, c2)
+            })
+            .collect();
+
+          for (e0_w, qc_w, j, a0, a2, b0, b2, c0, c2) in chunk_results {
+            e0_acc += e0_w;
+            quad_acc += qc_w;
+            A_layers_mem[2 * j] = a0;
+            A_layers_mem[2 * j + 1] = a2;
+            B_layers_mem[2 * j] = b0;
+            B_layers_mem[2 * j + 1] = b2;
+            C_layers_mem[2 * j] = c0;
+            C_layers_mem[2 * j + 1] = c2;
+          }
+
+          // Tail fold: pairs not covered by prove_pairs (empty for power-of-two m).
+          for i in (2 * prove_pairs)..fold_pairs {
+            let a_lo = std::mem::take(&mut A_layers[2 * i]).into_vec();
+            let a_hi = std::mem::take(&mut A_layers[2 * i + 1]).into_vec();
+            A_layers_mem[i] = a_lo.iter().zip(a_hi.iter())
+              .map(|(l, h)| *l + prev_r_b * (*h - *l)).collect();
+            let b_lo = std::mem::take(&mut B_layers[2 * i]).into_vec();
+            let b_hi = std::mem::take(&mut B_layers[2 * i + 1]).into_vec();
+            B_layers_mem[i] = b_lo.iter().zip(b_hi.iter())
+              .map(|(l, h)| *l + prev_r_b * (*h - *l)).collect();
+            let c_lo = std::mem::take(&mut C_layers[2 * i]).into_vec();
+            let c_hi = std::mem::take(&mut C_layers[2 * i + 1]).into_vec();
+            C_layers_mem[i] = c_lo.iter().zip(c_hi.iter())
+              .map(|(l, h)| *l + prev_r_b * (*h - *l)).collect();
+          }
+        }
+
+        A_layers.clear();
+        B_layers.clear();
+        C_layers.clear();
+
+        m = fold_pairs;
+        prev_r_b = finish_round!(t, e0_acc, quad_acc);
+      }
+
+      // Phase 3: in-memory rounds.
+      macro_rules! fold_abc_pair_mem {
+        ($src_even:expr, $src_odd:expr, $dest:expr, $r_b:expr) => {{
+          {
+            let even = std::mem::take(&mut A_layers_mem[$src_even]);
+            let odd = &A_layers_mem[$src_odd];
+            let mut folded = even;
+            folded.iter_mut().zip(odd.iter()).for_each(|(l, h)| *l += $r_b * (*h - *l));
+            A_layers_mem[$dest] = folded;
+          }
+          {
+            let even = std::mem::take(&mut B_layers_mem[$src_even]);
+            let odd = &B_layers_mem[$src_odd];
+            let mut folded = even;
+            folded.iter_mut().zip(odd.iter()).for_each(|(l, h)| *l += $r_b * (*h - *l));
+            B_layers_mem[$dest] = folded;
+          }
+          {
+            let even = std::mem::take(&mut C_layers_mem[$src_even]);
+            let odd = &C_layers_mem[$src_odd];
+            let mut folded = even;
+            folded.iter_mut().zip(odd.iter()).for_each(|(l, h)| *l += $r_b * (*h - *l));
+            C_layers_mem[$dest] = folded;
+          }
+        }};
+      }
+
+      for t in (intermediate_t + 1)..ell_b {
+        let fold_pairs = m / 2;
+        let prove_pairs = fold_pairs / 2;
+        let mut e0_acc = E::Scalar::ZERO;
+        let mut quad_acc = E::Scalar::ZERO;
+
+        {
+          let e_eq_ref = &E_eq;
+          let rhos_ref = &rhos;
+
+          let (a_head, _) = A_layers_mem.split_at_mut(4 * prove_pairs);
+          let (b_head, _) = B_layers_mem.split_at_mut(4 * prove_pairs);
+          let (c_head, _) = C_layers_mem.split_at_mut(4 * prove_pairs);
+
+          let (e0_sum, qc_sum) = a_head
+            .par_chunks_mut(4)
+            .zip(b_head.par_chunks_mut(4))
+            .zip(c_head.par_chunks_mut(4))
+            .enumerate()
+            .map(|(j, ((a_chunk, b_chunk), c_chunk))| {
+              for chunk in [&mut *a_chunk, &mut *b_chunk, &mut *c_chunk] {
+                {
+                  let (lo, hi) = chunk.split_at_mut(1);
+                  lo[0].iter_mut().zip(hi[0].iter()).for_each(|(l, h)| *l += prev_r_b * (*h - *l));
+                }
+                {
+                  let (lo, hi) = chunk.split_at_mut(3);
+                  lo[2].iter_mut().zip(hi[0].iter()).for_each(|(l, h)| *l += prev_r_b * (*h - *l));
+                }
+              }
+              let (e0, qc) = Self::prove_helper_mem(
+                t,
+                (left, right),
+                e_eq_ref,
+                &a_chunk[0],
+                &b_chunk[0],
+                &c_chunk[0],
+                &a_chunk[2],
+                &b_chunk[2],
+              );
+              let w = suffix_weight_full::<E::Scalar>(t, ell_b, j, rhos_ref);
+              (e0 * w, qc * w)
+            })
+            .reduce(
+              || (E::Scalar::ZERO, E::Scalar::ZERO),
+              |a, b| (a.0 + b.0, a.1 + b.1),
+            );
+          e0_acc += e0_sum;
+          quad_acc += qc_sum;
+
+          Self::compact_folded_layers_abc_mem(
+            &mut A_layers_mem,
+            &mut B_layers_mem,
+            &mut C_layers_mem,
+            prove_pairs,
+          );
+
+          for i in (2 * prove_pairs)..fold_pairs {
+            fold_abc_pair_mem!(2 * i, 2 * i + 1, i, prev_r_b);
+          }
+        }
+
+        A_layers_mem.truncate(fold_pairs);
+        B_layers_mem.truncate(fold_pairs);
+        C_layers_mem.truncate(fold_pairs);
+        m = fold_pairs;
+        prev_r_b = finish_round!(t, e0_acc, quad_acc);
+      }
+
+      // Final fold: fold remaining in-memory A/B/C layers.
       let final_pairs = m / 2;
       for i in 0..final_pairs {
-        fold_abc_pair!(2 * i, 2 * i + 1, i, prev_r_b);
+        fold_abc_pair_mem!(2 * i, 2 * i + 1, i, prev_r_b);
       }
-      A_layers.truncate(final_pairs);
-      B_layers.truncate(final_pairs);
-      C_layers.truncate(final_pairs);
+      A_layers_mem.truncate(final_pairs);
+      B_layers_mem.truncate(final_pairs);
+      C_layers_mem.truncate(final_pairs);
     }
     // T_out = poly_last(r_last) / eq(r_b, rho)
     let acc_eq_inv: Option<E::Scalar> = acc_eq.invert().into();
@@ -491,6 +809,7 @@ where
     vc.eq_rho_at_rb = acc_eq;
     let _ =
       SatisfyingAssignment::<E>::process_round(vc_state, vc_shape, vc_ck, vc, ell_b, transcript)?;
+    info!(elapsed_ms = %nifs_main_sumcheck_t.elapsed().as_millis(), "nifs_main_sumcheck");
 
     // Truncate witness W vectors to skip zero rest portion before folding.
     // The rest portion (indices effective_len..) is all zero for step circuits,
@@ -546,14 +865,21 @@ where
     let folded_U = R1CSInstance::<E>::new_unchecked(comm_acc, X_acc)?;
     info!(elapsed_ms = %fold_final_t.elapsed().as_millis(), "fold_instances");
 
-    Ok((
-      E_eq,
-      std::mem::take(&mut A_layers[0]).into_vec(),
-      std::mem::take(&mut B_layers[0]).into_vec(),
-      std::mem::take(&mut C_layers[0]).into_vec(),
-      folded_W,
-      folded_U,
-    ))
+    let (az_out, bz_out, cz_out) = if ell_b > 1 {
+      (
+        std::mem::take(&mut A_layers_mem[0]),
+        std::mem::take(&mut B_layers_mem[0]),
+        std::mem::take(&mut C_layers_mem[0]),
+      )
+    } else {
+      (
+        std::mem::take(&mut A_layers[0]).into_vec(),
+        std::mem::take(&mut B_layers[0]).into_vec(),
+        std::mem::take(&mut C_layers[0]).into_vec(),
+      )
+    };
+
+    Ok((E_eq, az_out, bz_out, cz_out, folded_W, folded_U))
   }
 }
 
