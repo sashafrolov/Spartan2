@@ -327,7 +327,6 @@ where
     S: &SplitR1CSShape<E>,
     _ck: &CommitmentKey<E>,
     Us: Vec<R1CSInstance<E>>,
-    mut Ws_is_small: Vec<bool>,
     mut Ws_r_W: Vec<<E::PCS as PCSEngineTrait<E>>::Blind>,
     mut Ws_W: Vec<scribe_streams::file_vec::FileVec<E::Scalar>>,
     mut A_layers: Vec<scribe_streams::file_vec::FileVec<E::Scalar>>,
@@ -366,7 +365,6 @@ where
     let mut Us = Us;
     if Us.len() < n_padded {
       Us.extend(vec![Us[0].clone(); n_padded - n]);
-      Ws_is_small.extend(vec![Ws_is_small[0]; n_padded - n]);
       Ws_r_W.extend(vec![Ws_r_W[0].clone(); n_padded - n]);
       for _ in n..n_padded {
         Ws_W.push(scribe_streams::file_vec::FileVec::clone(&Ws_W[0]));
@@ -625,32 +623,20 @@ where
             .zip(c_head.par_chunks_mut(4))
             .enumerate()
             .map(|(j, ((a_chunk, b_chunk), c_chunk))| {
-              let a0_lo = std::mem::take(&mut a_chunk[0]).into_vec();
-              let a0_hi = std::mem::take(&mut a_chunk[1]).into_vec();
-              let a0: Vec<E::Scalar> = a0_lo.iter().zip(a0_hi.iter())
-                .map(|(l, h)| *l + prev_r_b * (*h - *l)).collect();
-              let a2_lo = std::mem::take(&mut a_chunk[2]).into_vec();
-              let a2_hi = std::mem::take(&mut a_chunk[3]).into_vec();
-              let a2: Vec<E::Scalar> = a2_lo.iter().zip(a2_hi.iter())
-                .map(|(l, h)| *l + prev_r_b * (*h - *l)).collect();
+              let a0: Vec<E::Scalar> = a_chunk[0].iter().zip(a_chunk[1].iter())
+                .map(|(l, h)| l + prev_r_b * (h - l)).to_vec();
+              let a2: Vec<E::Scalar> = a_chunk[2].iter().zip(a_chunk[3].iter())
+                .map(|(l, h)| l + prev_r_b * (h - l)).to_vec();
 
-              let b0_lo = std::mem::take(&mut b_chunk[0]).into_vec();
-              let b0_hi = std::mem::take(&mut b_chunk[1]).into_vec();
-              let b0: Vec<E::Scalar> = b0_lo.iter().zip(b0_hi.iter())
-                .map(|(l, h)| *l + prev_r_b * (*h - *l)).collect();
-              let b2_lo = std::mem::take(&mut b_chunk[2]).into_vec();
-              let b2_hi = std::mem::take(&mut b_chunk[3]).into_vec();
-              let b2: Vec<E::Scalar> = b2_lo.iter().zip(b2_hi.iter())
-                .map(|(l, h)| *l + prev_r_b * (*h - *l)).collect();
+              let b0: Vec<E::Scalar> = b_chunk[0].iter().zip(b_chunk[1].iter())
+                .map(|(l, h)| l + prev_r_b * (h - l)).to_vec();
+              let b2: Vec<E::Scalar> = b_chunk[2].iter().zip(b_chunk[3].iter())
+                .map(|(l, h)| l + prev_r_b * (h - l)).to_vec();
 
-              let c0_lo = std::mem::take(&mut c_chunk[0]).into_vec();
-              let c0_hi = std::mem::take(&mut c_chunk[1]).into_vec();
-              let c0: Vec<E::Scalar> = c0_lo.iter().zip(c0_hi.iter())
-                .map(|(l, h)| *l + prev_r_b * (*h - *l)).collect();
-              let c2_lo = std::mem::take(&mut c_chunk[2]).into_vec();
-              let c2_hi = std::mem::take(&mut c_chunk[3]).into_vec();
-              let c2: Vec<E::Scalar> = c2_lo.iter().zip(c2_hi.iter())
-                .map(|(l, h)| *l + prev_r_b * (*h - *l)).collect();
+              let c0: Vec<E::Scalar> = c_chunk[0].iter().zip(c_chunk[1].iter())
+                .map(|(l, h)| l + prev_r_b * (h - l)).to_vec();
+              let c2: Vec<E::Scalar> = c_chunk[2].iter().zip(c_chunk[3].iter())
+                .map(|(l, h)| l + prev_r_b * (h - l)).to_vec();
 
               let (e0, qc) = Self::prove_helper_mem(
                 t, (left, right), e_eq_ref,
@@ -670,22 +656,6 @@ where
             B_layers_mem[2 * j + 1] = b2;
             C_layers_mem[2 * j] = c0;
             C_layers_mem[2 * j + 1] = c2;
-          }
-
-          // Tail fold: pairs not covered by prove_pairs (empty for power-of-two m).
-          for i in (2 * prove_pairs)..fold_pairs {
-            let a_lo = std::mem::take(&mut A_layers[2 * i]).into_vec();
-            let a_hi = std::mem::take(&mut A_layers[2 * i + 1]).into_vec();
-            A_layers_mem[i] = a_lo.iter().zip(a_hi.iter())
-              .map(|(l, h)| *l + prev_r_b * (*h - *l)).collect();
-            let b_lo = std::mem::take(&mut B_layers[2 * i]).into_vec();
-            let b_hi = std::mem::take(&mut B_layers[2 * i + 1]).into_vec();
-            B_layers_mem[i] = b_lo.iter().zip(b_hi.iter())
-              .map(|(l, h)| *l + prev_r_b * (*h - *l)).collect();
-            let c_lo = std::mem::take(&mut C_layers[2 * i]).into_vec();
-            let c_hi = std::mem::take(&mut C_layers[2 * i + 1]).into_vec();
-            C_layers_mem[i] = c_lo.iter().zip(c_hi.iter())
-              .map(|(l, h)| *l + prev_r_b * (*h - *l)).collect();
           }
         }
 
@@ -1149,12 +1119,11 @@ where
             })?;
             transcript.absorb(b"public_values", &public_values.as_slice());
 
-            let (split_instance, witness) = SatisfyingAssignment::r1cs_instance_and_witness(
+            let (split_instance, witness) = SatisfyingAssignment::r1cs_instance_and_witness_no_small_path(
               &mut ps_i,
               &pk.S_step,
               &pk.ck,
               &step_circuits[i],
-              is_small,
               &mut transcript,
             )?;
 
@@ -1167,12 +1136,12 @@ where
             let (av_fv, bv_fv, cv_fv) =
               from_iter(pk.S_step.multiply_vec_iter(&z)?).unzip3();
 
-            let R1CSWitness { W, r_W, is_small } = witness;
-            // TODO: Make this stylistically look like Pratyush's code. 
+            let R1CSWitness { W, r_W, is_small: _ } = witness;
+            // TODO: Make this stylistically look like Pratyush's code.
             // TODO: should be able to do a non-owning iter and move it up to get a bit more interleaving.
             let w_fv = from_iter(W.into_iter()).to_file_vec();
 
-            Ok((split_instance, is_small, r_W, w_fv, regular_instance, av_fv, bv_fv, cv_fv))
+            Ok((split_instance, r_W, w_fv, regular_instance, av_fv, bv_fv, cv_fv))
           })
           .collect()
       },
@@ -1203,7 +1172,7 @@ where
     info!(elapsed_ms = %gen_t.elapsed().as_millis(), step_circuits = step_circuits.len(), "generate_instances_witnesses");
 
     let du_out = std::process::Command::new("du")
-      .args(["-sk", "/tmp"])
+      .args(["-sk", "/home/sfrolov/scratch/temp_neutronnova_files"])
       .output();
     if let Ok(out) = du_out {
       info!(output = %String::from_utf8_lossy(&out.stdout), "du_tmp");
@@ -1212,15 +1181,13 @@ where
     // Unpack step results and pad A/B/C layers to n_padded (cloning from index 0).
     let mut step_instances = Vec::with_capacity(n);
     let mut step_witness_blinds = Vec::with_capacity(n);
-    let mut step_witness_is_small = Vec::with_capacity(n);
     let mut step_witnesses: Vec<scribe_streams::file_vec::FileVec<E::Scalar>> = Vec::with_capacity(n);
     let mut step_instances_regular = Vec::with_capacity(n);
     let mut A_layers: Vec<scribe_streams::file_vec::FileVec<E::Scalar>> = Vec::with_capacity(n_padded);
     let mut B_layers: Vec<scribe_streams::file_vec::FileVec<E::Scalar>> = Vec::with_capacity(n_padded);
     let mut C_layers: Vec<scribe_streams::file_vec::FileVec<E::Scalar>> = Vec::with_capacity(n_padded);
-    for (si, is_small, r_W, w_fv, ri, av_fv, bv_fv, cv_fv) in step_tuples {
+    for (si, r_W, w_fv, ri, av_fv, bv_fv, cv_fv) in step_tuples {
       step_instances.push(si);
-      step_witness_is_small.push(is_small);
       step_witness_blinds.push(r_W);
       step_witnesses.push(w_fv);
       step_instances_regular.push(ri);
@@ -1244,7 +1211,6 @@ where
       &pk.S_step,
       &pk.ck,
       step_instances_regular,
-      step_witness_is_small,
       step_witness_blinds,
       step_witnesses,
       A_layers,
@@ -1927,35 +1893,35 @@ mod tests {
     (pk, vk, circuits)
   }
 
-  fn test_neutron_inner<E: Engine, C1: SpartanCircuit<E>, C2: SpartanCircuit<E>>(
-    name: &str,
-    pk: &NeutronNovaProverKey<E>,
-    vk: &NeutronNovaVerifierKey<E>,
-    step_circuits: &[C1],
-    core_circuit: &C2,
-  ) where
-    E::PCS: FoldingEngineTrait<E>,
-  {
-    println!(
-      "[bench_neutron_inner] name: {name}, num_circuits: {}",
-      step_circuits.len()
-    );
+  // fn test_neutron_inner<E: Engine, C1: SpartanCircuit<E>, C2: SpartanCircuit<E>>(
+  //   name: &str,
+  //   pk: &NeutronNovaProverKey<E>,
+  //   vk: &NeutronNovaVerifierKey<E>,
+  //   step_circuits: &[C1],
+  //   core_circuit: &C2,
+  // ) where
+  //   E::PCS: FoldingEngineTrait<E>,
+  // {
+  //   println!(
+  //     "[bench_neutron_inner] name: {name}, num_circuits: {}",
+  //     step_circuits.len()
+  //   );
 
-    let res = NeutronNovaZkSNARK::prove(pk, step_circuits, core_circuit, true);
-    assert!(res.is_ok());
+  //   let res = NeutronNovaZkSNARK::prove(pk, step_circuits, core_circuit, true);
+  //   assert!(res.is_ok());
 
-    let snark = res.unwrap();
-    let res = snark.verify(vk, step_circuits.len());
-    println!(
-      "[bench_neutron_inner] name: {name}, num_circuits: {}, verify res: {:?}",
-      step_circuits.len(),
-      res
-    );
-    assert!(res.is_ok());
+  //   let snark = res.unwrap();
+  //   let res = snark.verify(vk, step_circuits.len());
+  //   println!(
+  //     "[bench_neutron_inner] name: {name}, num_circuits: {}, verify res: {:?}",
+  //     step_circuits.len(),
+  //     res
+  //   );
+  //   assert!(res.is_ok());
 
-    let (public_values_step, _public_values_core) = res.unwrap();
-    assert_eq!(public_values_step.len(), step_circuits.len());
-  }
+  //   let (public_values_step, _public_values_core) = res.unwrap();
+  //   assert_eq!(public_values_step.len(), step_circuits.len());
+  // }
 
   #[test]
   fn test_neutron_sha256() {

@@ -537,6 +537,107 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
   }
 }
 
+impl<E: Engine> SatisfyingAssignment<E> {
+  /// Same as `r1cs_instance_and_witness` but skips small-value detection.
+  /// Always uses `is_small = false` for the rest commitment and witness, avoiding
+  /// the cost of iterating over the witness to check field-element sizes.
+  pub fn r1cs_instance_and_witness_no_small_path<C: SpartanCircuit<E>>(
+    ps: &mut PrecommittedState<E>,
+    S: &SplitR1CSShape<E>,
+    ck: &CommitmentKey<E>,
+    circuit: &C,
+    transcript: &mut E::TE,
+  ) -> Result<(SplitR1CSInstance<E>, R1CSWitness<E>), SpartanError> {
+    let (_synth_span, synth_t) = start_span!("circuit_synthesize_rest");
+
+    if let Some(comm_W_shared) = &ps.comm_W_shared {
+      transcript.absorb(b"comm_W_shared", comm_W_shared);
+    }
+    if let Some(comm_W_precommitted) = &ps.comm_W_precommitted {
+      transcript.absorb(b"comm_W_precommitted", comm_W_precommitted);
+    }
+
+    let challenges = (0..S.num_challenges)
+      .map(|_| transcript.squeeze(b"challenge"))
+      .collect::<Result<Vec<E::Scalar>, SpartanError>>()?;
+
+    let skip_synthesize = S.num_rest_unpadded == 0 && challenges.is_empty();
+    if !skip_synthesize {
+      let prep_aux_len = S.num_shared_unpadded + S.num_precommitted_unpadded;
+      ps.cs.aux_assignment.truncate(prep_aux_len);
+      ps.cs.input_assignment.truncate(1);
+
+      circuit
+        .synthesize(&mut ps.cs, &ps.shared, &ps.precommitted, Some(&challenges))
+        .map_err(|e| SpartanError::SynthesisError {
+          reason: format!("Unable to synthesize witness: {e}"),
+        })?;
+
+      ps.W[S.num_shared + S.num_precommitted
+        ..S.num_shared + S.num_precommitted + S.num_rest_unpadded]
+        .copy_from_slice(
+          &ps.cs.aux_assignment[S.num_shared_unpadded + S.num_precommitted_unpadded
+            ..S.num_shared_unpadded + S.num_precommitted_unpadded + S.num_rest_unpadded],
+        );
+    }
+
+    let (_commit_rest_span, commit_rest_t) = start_span!("commit_witness_rest");
+    let r_W_rest = PCS::<E>::blind(ck, S.num_rest);
+    let (comm_W_rest, actual_is_small) = if S.num_rest_unpadded == 0 {
+      (PCS::<E>::commit_zeros(ck, S.num_rest, &r_W_rest)?, true)
+    } else {
+      let rest_slice =
+        &ps.W[S.num_shared + S.num_precommitted..S.num_shared + S.num_precommitted + S.num_rest];
+      (PCS::<E>::commit(ck, rest_slice, &r_W_rest, false)?, false)
+    };
+    info!(elapsed_ms = %commit_rest_t.elapsed().as_millis(), "commit_witness_rest");
+    transcript.absorb(b"comm_W_rest", &comm_W_rest);
+
+    let public_values = if skip_synthesize {
+      circuit
+        .public_values()
+        .map_err(|e| SpartanError::SynthesisError {
+          reason: format!("Circuit does not provide public IO: {e}"),
+        })?
+    } else {
+      ps.cs.input_assignment[1..].to_vec()[..S.num_public].to_vec()
+    };
+    let U = SplitR1CSInstance::<E>::new(
+      S,
+      ps.comm_W_shared.clone(),
+      ps.comm_W_precommitted.clone(),
+      comm_W_rest,
+      public_values,
+      challenges,
+    )?;
+
+    let mut blinds = Vec::with_capacity(3);
+    if let Some(r_W_shared) = &ps.r_W_shared {
+      blinds.push(r_W_shared.clone());
+    }
+    if let Some(r_W_precommitted) = &ps.r_W_precommitted {
+      blinds.push(r_W_precommitted.clone());
+    }
+    blinds.push(r_W_rest);
+
+    let r_W = PCS::<E>::combine_blinds(&blinds)?;
+
+    let num_vars = S.num_shared + S.num_precommitted + S.num_rest;
+    let w_vec = std::mem::replace(&mut ps.W, vec![E::Scalar::ZERO; num_vars]);
+    ps.W[..S.num_shared_unpadded].copy_from_slice(&ps.cs.aux_assignment[..S.num_shared_unpadded]);
+    ps.W[S.num_shared..S.num_shared + S.num_precommitted_unpadded].copy_from_slice(
+      &ps.cs.aux_assignment
+        [S.num_shared_unpadded..S.num_shared_unpadded + S.num_precommitted_unpadded],
+    );
+
+    let W = R1CSWitness::<E>::new_unchecked(w_vec, r_W, actual_is_small)?;
+
+    info!(elapsed_ms = %synth_t.elapsed().as_millis(), "circuit_synthesize_rest");
+
+    Ok((U, W))
+  }
+}
+
 impl<E: Engine> RerandomizationTrait<E> for PrecommittedState<E> {
   fn rerandomize(&self, ck: &CommitmentKey<E>, S: &SplitR1CSShape<E>) -> Result<Self, SpartanError>
   where
