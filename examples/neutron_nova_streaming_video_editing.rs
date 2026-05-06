@@ -18,6 +18,7 @@ use spartan2::{
   provider::T256HyraxEngine,
   traits::Engine,
 };
+use rayon::prelude::*;
 use std::time::Instant;
 use tracing::{info, info_span};
 
@@ -63,6 +64,7 @@ fn main() {
   // Build the step circuits — each represents one video frame.
   let t0 = Instant::now();
   let step_circuits: Vec<ExampleVideoEditCircuit<<E as Engine>::Scalar>> = (0..NUM_CIRCUITS)
+    .into_par_iter()
     .map(|i| ExampleVideoEditCircuit::<<E as Engine>::Scalar>::new(generate_random_image(IMAGE_DIMS, i as u64), i as u64))
     .collect();
   info!(elapsed_ms = t0.elapsed().as_millis(), "generate_witness");
