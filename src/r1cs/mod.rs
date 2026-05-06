@@ -6,25 +6,19 @@
 
 //! This module defines R1CS related types
 use crate::{
-  Blind, Commitment, CommitmentKey, DEFAULT_COMMITMENT_WIDTH, PCS, VerifierKey,
-  big_num::DelayedReduction,
-  big_num::montgomery::MontgomeryLimbs,
-  digest::SimpleDigestible,
-  errors::SpartanError,
-  traits::{
+  Blind, Commitment, CommitmentKey, DEFAULT_COMMITMENT_WIDTH, PCS, VerifierKey, big_num::{DelayedReduction, montgomery::MontgomeryLimbs}, digest::SimpleDigestible, errors::SpartanError, math::Math, traits::{
     Engine,
     pcs::{FoldingEngineTrait, PCSEngineTrait},
     transcript::{TranscriptEngineTrait, TranscriptReprTrait},
-  },
+  }
 };
 use core::cmp::max;
 use ff::{Field, PrimeField};
 use once_cell::sync::OnceCell;
 use rayon::prelude::*;
-use scribe_streams::iterator::BatchedIterator;
 use serde::{Deserialize, Serialize};
 
-const FOLD_MULTIPLE_CHUNK_SIZE: usize = 4;
+// const FOLD_MULTIPLE_CHUNK_SIZE: usize = 4;
 
 mod folds;
 mod sparse;
@@ -658,61 +652,53 @@ impl<E: Engine> R1CSWitness<E> {
   pub fn fold_multiple_streaming(
     r_bs: &[E::Scalar],
     Ws_r_W: &[<E::PCS as PCSEngineTrait<E>>::Blind],
-    Ws_W: &[scribe_streams::file_vec::FileVec<E::Scalar>],
+    Zs: &[Vec<E::Scalar>],
+    instance_length: usize,
   ) -> Result<R1CSWitness<E>, SpartanError>
   where
     E::PCS: FoldingEngineTrait<E>,
     E::Scalar: scribe_streams::serialize::SerializeRaw + scribe_streams::serialize::DeserializeRaw,
   {
-    let n = Ws_W.len();
-    if n == 0 {
+    let witness_n = Zs.len();
+    if witness_n == 0 {
       return Err(SpartanError::InvalidInputLength {
         reason: "fold_multiple_streaming: empty witness list".into(),
       });
     }
 
-    let w = weights_from_r::<E::Scalar>(r_bs, n);
+    let blinds_n = Ws_r_W.len();
+    if blinds_n == 0 {
+      return Err(SpartanError::InvalidInputLength {
+        reason: "fold_multiple_streaming: empty blinds list".into(),
+      });
+    }
 
-    if w.len() != n {
+    let w_full = weights_from_r::<E::Scalar>(r_bs, blinds_n);
+    let non_w_length = instance_length + 1;
+    
+    let suffix_vars_len = Zs.len().log_2();
+    let w_partial = weights_from_r::<E::Scalar>(&r_bs[r_bs.len() - suffix_vars_len..], witness_n);
+
+
+    if w_full.len() != blinds_n {
       return Err(SpartanError::InvalidInputLength {
         reason: "fold_multiple_streaming: weights length mismatch".into(),
       });
     }
 
-    let dim = Ws_W[0].len();
+    if w_full.len() != witness_n {
+      return Err(SpartanError::InvalidInputLength {
+        reason: "fold_multiple_streaming: weights length mismatch".into(),
+      });
+    }
 
-    if !Ws_W.iter().all(|z| z.len() == dim) {
+    let dim = Zs[0].len() - non_w_length;
+
+    if !Zs.iter().all(|z| z.len() == dim) {
       return Err(SpartanError::InvalidInputLength {
         reason: "fold_multiple_streaming: all W vectors must have the same length".into(),
       });
     }
-
-    // Reduce Ws_W in chunks to avoid loading all witnesses into memory simultaneously.
-    // Each chunk of FileVecs is zipped together and reduced to a single Vec<E::Scalar>
-    // via weighted accumulation, then the per-chunk results are summed.
-    let reduced_chunk_vectors: Vec<Vec<E::Scalar>> = Ws_W
-      .chunks(FOLD_MULTIPLE_CHUNK_SIZE)
-      .enumerate()
-      .map(|(chunk_idx, chunk)| {
-        let w_offset = chunk_idx * FOLD_MULTIPLE_CHUNK_SIZE;
-        let chunk_weights: Vec<E::Scalar> = w[w_offset..w_offset + chunk.len()].to_vec();
-        let iters: Vec<_> = chunk.iter().map(|fv| fv.iter()).collect();
-        scribe_streams::iterator::zip_many(iters)
-          .map(move |vals: scribe_streams::iterator::zip_many::SVec<E::Scalar>| {
-            type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
-            let mut acc = Acc::<E::Scalar>::default();
-            for (k, v) in vals.iter().enumerate() {
-              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-                &mut acc,
-                &chunk_weights[k],
-                v,
-              );
-            }
-            <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc)
-          })
-          .to_vec()
-      })
-      .collect();
 
     let mut acc_W = vec![E::Scalar::ZERO; dim];
     let tile = 4096;
@@ -722,18 +708,23 @@ impl<E: Engine> R1CSWitness<E> {
       .enumerate()
       .for_each(|(block_idx, acc_blk)| {
         let start = block_idx * tile;
-        for (j, acc_blk_j) in acc_blk.iter_mut().enumerate() {
-          let mut sum = E::Scalar::ZERO;
-          for chunk_vec in &reduced_chunk_vectors {
-            sum += chunk_vec[start + j];
+          type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
+          for (j, acc_blk_j) in acc_blk.iter_mut().enumerate() {
+            let mut acc = Acc::<E::Scalar>::default();
+            for (i, &wi) in w_partial.iter().enumerate() {
+              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+                &mut acc,
+                &wi,
+                &Zs[i][non_w_length + start + j],
+              );
+            }
+            *acc_blk_j = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc);
           }
-          *acc_blk_j = sum;
-        }
       });
 
     let acc_r = <E::PCS as FoldingEngineTrait<E>>::fold_blinds(
       &Ws_r_W.iter().cloned().collect::<Vec<_>>(),
-      &w,
+      &w_full,
     )?;
 
     Ok(R1CSWitness::<E> {
@@ -1224,6 +1215,35 @@ impl<E: Engine> SplitR1CSShape<E> {
         || rayon::join(|| pb.multiply_vec(z), || pc.multiply_vec(z)),
       );
       Ok((az, bz, cz))
+    }
+  }
+
+  pub fn multiply_vec_no_cz(
+    &self,
+    z: &[E::Scalar],
+  ) -> Result<(Vec<E::Scalar>, Vec<E::Scalar>), SpartanError> {
+    if z.len()
+      != self.num_public
+        + self.num_challenges
+        + 1
+        + self.num_shared
+        + self.num_precommitted
+        + self.num_rest
+    {
+      return Err(SpartanError::InvalidWitnessLength);
+    }
+
+    self.ensure_precomputed();
+    let pa = self.precomp_A.get().unwrap();
+    let pb = self.precomp_B.get().unwrap();
+
+    if rayon::current_num_threads() <= 1 {
+      let az = pa.multiply_vec(z);
+      let bz = pb.multiply_vec(z);
+      Ok((az, bz))
+    } else {
+      let (az, bz) = rayon::join(|| pa.multiply_vec(z), || pb.multiply_vec(z));
+      Ok((az, bz))
     }
   }
 

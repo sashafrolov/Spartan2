@@ -9,6 +9,7 @@
 //! this doesn't implement the "small value sumcheck" optimizations. 
 use scribe_streams::{
   iterator::{BatchedIterator, from_iter},
+  file_vec::FileVec,
   serialize::{DeserializeRaw, SerializeRaw},
 };
 use crate::start_span;
@@ -97,123 +98,138 @@ where
   /// Computes the evaluations of the sum-check polynomial at 0, 2, and 3
   /// Uses two-level delayed modular reduction (inner + middle levels).
   /// Note: Outer level (over pairs) uses regular field arithmetic since there are few pairs.
-  #[inline(always)]
-  #[allow(clippy::needless_range_loop)]
-  fn prove_helper(
-    round: usize,
-    (left, right): (usize, usize),
-    e: &[E::Scalar],
-    Az1: &scribe_streams::file_vec::FileVec<E::Scalar>,
-    Bz1: &scribe_streams::file_vec::FileVec<E::Scalar>,
-    Cz1: &scribe_streams::file_vec::FileVec<E::Scalar>,
-    Az2: &scribe_streams::file_vec::FileVec<E::Scalar>,
-    Bz2: &scribe_streams::file_vec::FileVec<E::Scalar>,
-  ) -> (E::Scalar, E::Scalar)
-  where
-    E::Scalar: SerializeRaw + DeserializeRaw,
-  {
-    type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
+  // #[inline(always)]
+  // #[allow(clippy::needless_range_loop)]
+  // fn prove_helper(
+  //   round: usize,
+  //   (left, right): (usize, usize),
+  //   e: &[E::Scalar],
+  //   Az1: &scribe_streams::file_vec::FileVec<E::Scalar>,
+  //   Bz1: &scribe_streams::file_vec::FileVec<E::Scalar>,
+  //   Cz1: &scribe_streams::file_vec::FileVec<E::Scalar>,
+  //   Az2: &scribe_streams::file_vec::FileVec<E::Scalar>,
+  //   Bz2: &scribe_streams::file_vec::FileVec<E::Scalar>,
+  // ) -> (E::Scalar, E::Scalar)
+  // where
+  //   E::Scalar: SerializeRaw + DeserializeRaw,
+  // {
+  //   type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
 
-    // sanity check sizes
-    assert_eq!(e.len(), left + right);
-    assert_eq!(Az1.len(), left * right);
+  //   // sanity check sizes
+  //   assert_eq!(e.len(), left + right);
+  //   assert_eq!(Az1.len(), left * right);
 
-    let f = &e[left..];
-    let e_left = &e[..left];
-    let compute_e0 = round != 0;
+  //   let f = &e[left..];
+  //   let e_left = &e[..left];
+  //   let compute_e0 = round != 0;
 
-    let mut acc_e0 = Acc::<E::Scalar>::default();
-    let mut acc_quad = Acc::<E::Scalar>::default();
+  //   let mut acc_e0 = Acc::<E::Scalar>::default();
+  //   let mut acc_quad = Acc::<E::Scalar>::default();
 
-    if compute_e0 {
-      let mut iter = Az1.iter()
-        .zip(Bz1.iter())
-        .zip(Cz1.iter())
-        .zip(Az2.iter())
-        .zip(Bz2.iter());
-      let mut idx = 0usize;
-      let mut inner_e0 = Acc::<E::Scalar>::default();
-      let mut inner_quad = Acc::<E::Scalar>::default();
-      while let Some(batch) = iter.next_batch() {
-        for ((((az1, bz1), cz1), az2), bz2) in batch.collect::<Vec<_>>() {
-          let j = idx % left;
-          let i = idx / left;
-          let inner_val = az1 * bz1 - cz1;
-          <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-            &mut inner_e0, &e_left[j], &inner_val,
-          );
-          let quad_val = (az2 - az1) * (bz2 - bz1);
-          <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-            &mut inner_quad, &e_left[j], &quad_val,
-          );
-          if j == left - 1 {
-            let inner_e0_red = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_e0);
-            let inner_quad_red = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_quad);
-            inner_e0 = Acc::<E::Scalar>::default();
-            inner_quad = Acc::<E::Scalar>::default();
-            <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-              &mut acc_e0, &f[i], &inner_e0_red,
-            );
-            <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-              &mut acc_quad, &f[i], &inner_quad_red,
-            );
-          }
-          idx += 1;
-        }
-      }
-    } else {
-      let mut iter = Az1.iter()
-        .zip(Bz1.iter())
-        .zip(Az2.iter())
-        .zip(Bz2.iter());
-      let mut idx = 0usize;
-      let mut inner_quad = Acc::<E::Scalar>::default();
-      while let Some(batch) = iter.next_batch() {
-        for (((az1, bz1), az2), bz2) in batch.collect::<Vec<_>>() {
-          let j = idx % left;
-          let i = idx / left;
-          let quad_val = (az2 - az1) * (bz2 - bz1);
-          <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-            &mut inner_quad, &e_left[j], &quad_val,
-          );
-          if j == left - 1 {
-            let inner_quad_red = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_quad);
-            inner_quad = Acc::<E::Scalar>::default();
-            <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-              &mut acc_quad, &f[i], &inner_quad_red,
-            );
-          }
-          idx += 1;
-        }
-      }
-    }
+  //   if compute_e0 {
+  //     let mut iter = Az1.iter()
+  //       .zip(Bz1.iter())
+  //       .zip(Cz1.iter())
+  //       .zip(Az2.iter())
+  //       .zip(Bz2.iter());
+  //     let mut idx = 0usize;
+  //     let mut inner_e0 = Acc::<E::Scalar>::default();
+  //     let mut inner_quad = Acc::<E::Scalar>::default();
+  //     while let Some(batch) = iter.next_batch() {
+  //       for ((((az1, bz1), cz1), az2), bz2) in batch.collect::<Vec<_>>() {
+  //         let j = idx % left;
+  //         let i = idx / left;
+  //         let inner_val = az1 * bz1 - cz1;
+  //         <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+  //           &mut inner_e0, &e_left[j], &inner_val,
+  //         );
+  //         let quad_val = (az2 - az1) * (bz2 - bz1);
+  //         <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+  //           &mut inner_quad, &e_left[j], &quad_val,
+  //         );
+  //         if j == left - 1 {
+  //           let inner_e0_red = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_e0);
+  //           let inner_quad_red = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_quad);
+  //           inner_e0 = Acc::<E::Scalar>::default();
+  //           inner_quad = Acc::<E::Scalar>::default();
+  //           <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+  //             &mut acc_e0, &f[i], &inner_e0_red,
+  //           );
+  //           <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+  //             &mut acc_quad, &f[i], &inner_quad_red,
+  //           );
+  //         }
+  //         idx += 1;
+  //       }
+  //     }
+  //   } else {
+  //     let mut iter = Az1.iter()
+  //       .zip(Bz1.iter())
+  //       .zip(Az2.iter())
+  //       .zip(Bz2.iter());
+  //     let mut idx = 0usize;
+  //     let mut inner_quad = Acc::<E::Scalar>::default();
+  //     while let Some(batch) = iter.next_batch() {
+  //       for (((az1, bz1), az2), bz2) in batch.collect::<Vec<_>>() {
+  //         let j = idx % left;
+  //         let i = idx / left;
+  //         let quad_val = (az2 - az1) * (bz2 - bz1);
+  //         <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+  //           &mut inner_quad, &e_left[j], &quad_val,
+  //         );
+  //         if j == left - 1 {
+  //           let inner_quad_red = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&inner_quad);
+  //           inner_quad = Acc::<E::Scalar>::default();
+  //           <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+  //             &mut acc_quad, &f[i], &inner_quad_red,
+  //           );
+  //         }
+  //         idx += 1;
+  //       }
+  //     }
+  //   }
 
-    (
-      <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_e0),
-      <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_quad),
-    )
-  }
+  //   (
+  //     <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_e0),
+  //     <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc_quad),
+  //   )
+  // }
 
   /// Compact folded results from positions [4j, 4j+2]
-  /// down to [2j, 2j+1] for A, B, and C layers.
-  fn compact_folded_layers_abc(
-    a: &mut [scribe_streams::file_vec::FileVec<E::Scalar>],
-    b: &mut [scribe_streams::file_vec::FileVec<E::Scalar>],
-    c: &mut [scribe_streams::file_vec::FileVec<E::Scalar>],
+  /// down to [2j, 2j+1] for a single z layer.
+  fn compact_folded_layers_z(
+    z: &mut [scribe_streams::file_vec::FileVec<E::Scalar>],
     prove_pairs: usize,
   )
   where
     E::Scalar: SerializeRaw + DeserializeRaw,
   {
     for j in 0..prove_pairs {
-      a.swap(2 * j, 4 * j);
-      a.swap(2 * j + 1, 4 * j + 2);
-      b.swap(2 * j, 4 * j);
-      b.swap(2 * j + 1, 4 * j + 2);
-      c.swap(2 * j, 4 * j);
-      c.swap(2 * j + 1, 4 * j + 2);
+      z.swap(2 * j, 4 * j);
+      z.swap(2 * j + 1, 4 * j + 2);
     }
   }
+
+  /// Compact folded results from positions [4j, 4j+2]
+  /// down to [2j, 2j+1] for A, B, and C layers.
+  // fn compact_folded_layers_abc(
+  //   a: &mut [scribe_streams::file_vec::FileVec<E::Scalar>],
+  //   b: &mut [scribe_streams::file_vec::FileVec<E::Scalar>],
+  //   c: &mut [scribe_streams::file_vec::FileVec<E::Scalar>],
+  //   prove_pairs: usize,
+  // )
+  // where
+  //   E::Scalar: SerializeRaw + DeserializeRaw,
+  // {
+  //   for j in 0..prove_pairs {
+  //     a.swap(2 * j, 4 * j);
+  //     a.swap(2 * j + 1, 4 * j + 2);
+  //     b.swap(2 * j, 4 * j);
+  //     b.swap(2 * j + 1, 4 * j + 2);
+  //     c.swap(2 * j, 4 * j);
+  //     c.swap(2 * j + 1, 4 * j + 2);
+  //   }
+  // }
 
   /// In-memory variant of compact_folded_layers_abc for Vec layers.
   fn compact_folded_layers_abc_mem(
@@ -328,10 +344,7 @@ where
     _ck: &CommitmentKey<E>,
     Us: Vec<R1CSInstance<E>>,
     mut Ws_r_W: Vec<<E::PCS as PCSEngineTrait<E>>::Blind>,
-    mut Ws_W: Vec<scribe_streams::file_vec::FileVec<E::Scalar>>,
-    mut A_layers: Vec<scribe_streams::file_vec::FileVec<E::Scalar>>,
-    mut B_layers: Vec<scribe_streams::file_vec::FileVec<E::Scalar>>,
-    mut C_layers: Vec<scribe_streams::file_vec::FileVec<E::Scalar>>,
+    mut Zs: Vec<scribe_streams::file_vec::FileVec<E::Scalar>>,
     vc: &mut NeutronNovaVerifierCircuit<E>,
     vc_state: &mut <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::MultiRoundState, // wrapper circuit, fine
     vc_shape: &SplitMultiRoundR1CSShape<E>, // wrapper circuit, fine
@@ -367,7 +380,7 @@ where
       Us.extend(vec![Us[0].clone(); n_padded - n]);
       Ws_r_W.extend(vec![Ws_r_W[0].clone(); n_padded - n]);
       for _ in n..n_padded {
-        Ws_W.push(scribe_streams::file_vec::FileVec::clone(&Ws_W[0]));
+        Zs.push(scribe_streams::file_vec::FileVec::clone(&Zs[0]));
       }
     }
     let (_absorb_span, absorb_t) = start_span!("transcript_operations");
@@ -433,54 +446,29 @@ where
       }};
     }
 
-    macro_rules! fold_abc_pair {
-      ($src_even:expr, $src_odd:expr, $dest:expr, $r_b:expr) => {{
-        {
-          let even = std::mem::take(&mut A_layers[$src_even]);
-          let odd = &A_layers[$src_odd];
-          let folded = even.iter().zip(odd.iter()).map(|(l, h)| {
-            l + $r_b * (h - l)
-          }).to_file_vec();
-          A_layers[$dest] = folded;
-        }
-        {
-          let even = std::mem::take(&mut B_layers[$src_even]);
-          let odd = &B_layers[$src_odd];
-          let folded = even.iter().zip(odd.iter()).map(|(l, h)| {
-            l + $r_b * (h - l)
-          }).to_file_vec();
-          B_layers[$dest] = folded;
-        }
-        {
-          let even = std::mem::take(&mut C_layers[$src_even]);
-          let odd = &C_layers[$src_odd];
-          let folded = even.iter().zip(odd.iter()).map(|(l, h)| {
-            l + $r_b * (h - l)
-          }).to_file_vec();
-          C_layers[$dest] = folded;
-        }
-      }};
-    }
-
     let (_nifs_main_sumcheck_span, nifs_main_sumcheck_t) = start_span!("nifs_main_sumcheck");
     // Round 0: prove_helper
     {
-      let pairs = m / 2;
-      let (e0, quad_coeff) = A_layers
+      let (e0, quad_coeff) = Zs
         .par_chunks(2)
-        .zip(B_layers.par_chunks(2))
-        .zip(C_layers.par_chunks(2))
         .enumerate()
-        .map(|(pair_idx, ((pair_a, pair_b), pair_c))| {
-          let (e0, quad_coeff) = Self::prove_helper(
+        .map(|(pair_idx, pair_z)| {
+          let z0 = FileVec::clone(&pair_z[0]).into_vec();
+          let (a0, b0, c0) = S.multiply_vec(&z0).unwrap();
+
+          let z1 = FileVec::clone(&pair_z[0]).into_vec();
+          let (a1, b1) = S.multiply_vec_no_cz(&z1).unwrap();          
+
+          // In progress. Don't worry about build.
+          let (e0, quad_coeff) = Self::prove_helper_mem(
             0,
             (left, right),
             &E_eq,
-            &pair_a[0],
-            &pair_b[0],
-            &pair_c[0],
-            &pair_a[1],
-            &pair_b[1],
+            &a0,
+            &b0,
+            &c0,
+            &a1,
+            &b1,
           );
           let w = suffix_weight_full::<E::Scalar>(0, ell_b, pair_idx, &rhos);
           (e0 * w, quad_coeff * w)
@@ -489,16 +477,10 @@ where
           || (E::Scalar::ZERO, E::Scalar::ZERO),
           |a, b| (a.0 + b.0, a.1 + b.1),
         );
-      let r_b = finish_round!(0, e0, quad_coeff);
+      let _r_b = finish_round!(0, e0, quad_coeff);
 
       if ell_b == 1 {
-        for i in 0..pairs {
-          fold_abc_pair!(2 * i, 2 * i + 1, i, r_b);
-        }
-        A_layers.truncate(pairs);
-        B_layers.truncate(pairs);
-        C_layers.truncate(pairs);
-        m = pairs;
+        panic!("Didn't implement for ell_b = 1! This is optimized for higher n!");
       }
     }
 
@@ -512,6 +494,7 @@ where
     let mut A_layers_mem: Vec<Vec<E::Scalar>> = Vec::new();
     let mut B_layers_mem: Vec<Vec<E::Scalar>> = Vec::new();
     let mut C_layers_mem: Vec<Vec<E::Scalar>> = Vec::new();
+    let mut Z_layers_mem: Vec<Vec<E::Scalar>> = Vec::new();
 
     if ell_b > 1 {
       let mut prev_r_b = r_bs[0];
@@ -533,39 +516,41 @@ where
           let e_eq_ref = &E_eq;
           let rhos_ref = &rhos;
 
-          let (a_head, _) = A_layers.split_at_mut(4 * prove_pairs);
-          let (b_head, _) = B_layers.split_at_mut(4 * prove_pairs);
-          let (c_head, _) = C_layers.split_at_mut(4 * prove_pairs);
+          let (z_head, _) = Zs.split_at_mut(4 * prove_pairs);
 
-          let (e0_sum, qc_sum) = a_head
+          let (e0_sum, qc_sum) = z_head
             .par_chunks_mut(4)
-            .zip(b_head.par_chunks_mut(4))
-            .zip(c_head.par_chunks_mut(4))
             .enumerate()
-            .map(|(j, ((a_chunk, b_chunk), c_chunk))| {
-              for chunk in [&mut *a_chunk, &mut *b_chunk, &mut *c_chunk] {
-                {
-                  let (lo, hi) = chunk.split_at_mut(1);
-                  lo[0] = lo[0].iter().zip(hi[0].iter()).map(|(l, h)| {
-                    l + prev_r_b * (h - l)
-                  }).to_file_vec();
-                }
-                {
-                  let (lo, hi) = chunk.split_at_mut(3);
-                  lo[2] = lo[2].iter().zip(hi[0].iter()).map(|(l, h)| {
-                    l + prev_r_b * (h - l)
-                  }).to_file_vec();
-                }
-              }
-              let (e0, qc) = Self::prove_helper(
+            .map(|(j, pair_z)| {
+              let (lo, hi) = pair_z.split_at_mut(1);
+              let (folded_z0, folded_z_fv0) = FileVec::vec_file_vec_from_batched_iter_with_prefix(
+                lo[0].iter().zip(hi[0].iter()).map(|(l, h)| {
+                  l + prev_r_b * (h - l)
+                }),
+                "folded_z",
+              );
+              pair_z[0] = folded_z_fv0;
+              let (a0, b0, c0) = S.multiply_vec(&folded_z0).unwrap();
+
+              let (lo, hi) = pair_z.split_at_mut(3);
+              let (folded_z2, folded_z_fv2) = FileVec::vec_file_vec_from_batched_iter_with_prefix(
+                lo[2].iter().zip(hi[0].iter()).map(|(l, h)| {
+                  l + prev_r_b * (h - l)
+                }),
+                "folded_z",
+              );
+              pair_z[2] = folded_z_fv2;
+              let (a2, b2) = S.multiply_vec_no_cz(&folded_z2).unwrap();
+
+              let (e0, qc) = Self::prove_helper_mem(
                 t,
                 (left, right),
                 e_eq_ref,
-                &a_chunk[0],
-                &b_chunk[0],
-                &c_chunk[0],
-                &a_chunk[2],
-                &b_chunk[2],
+                &a0,
+                &b0,
+                &c0,
+                &a2,
+                &b2,
               );
               let w = suffix_weight_full::<E::Scalar>(t, ell_b, j, rhos_ref);
               (e0 * w, qc * w)
@@ -577,16 +562,12 @@ where
           e0_acc += e0_sum;
           quad_acc += qc_sum;
 
-          Self::compact_folded_layers_abc(&mut A_layers, &mut B_layers, &mut C_layers, prove_pairs);
+          Self::compact_folded_layers_z(&mut Zs, prove_pairs);
 
-          for i in (2 * prove_pairs)..fold_pairs {
-            fold_abc_pair!(2 * i, 2 * i + 1, i, prev_r_b);
-          }
+          assert_eq!(2 * prove_pairs, fold_pairs, "fold_pairs must be a power of 2");
         }
 
-        A_layers.truncate(fold_pairs);
-        B_layers.truncate(fold_pairs);
-        C_layers.truncate(fold_pairs);
+        Zs.truncate(fold_pairs);
         m = fold_pairs;
         prev_r_b = finish_round!(t, e0_acc, quad_acc);
       }
@@ -602,14 +583,13 @@ where
         A_layers_mem = vec![Vec::new(); fold_pairs];
         B_layers_mem = vec![Vec::new(); fold_pairs];
         C_layers_mem = vec![Vec::new(); fold_pairs];
+        Z_layers_mem = vec![Vec::new(); fold_pairs];    
 
         {
           let e_eq_ref = &E_eq;
           let rhos_ref = &rhos;
 
-          let (a_head, _) = A_layers.split_at_mut(4 * prove_pairs);
-          let (b_head, _) = B_layers.split_at_mut(4 * prove_pairs);
-          let (c_head, _) = C_layers.split_at_mut(4 * prove_pairs);
+          let (z_head, _) = Zs.split_at_mut(4 * prove_pairs);
 
           // Fold each group of 4 FileVecs into 2 in-memory Vecs, then prove.
           let chunk_results: Vec<(
@@ -617,37 +597,33 @@ where
             Vec<E::Scalar>, Vec<E::Scalar>,
             Vec<E::Scalar>, Vec<E::Scalar>,
             Vec<E::Scalar>, Vec<E::Scalar>,
-          )> = a_head
+            Vec<E::Scalar>, Vec<E::Scalar>,
+          )> = z_head
             .par_chunks_mut(4)
-            .zip(b_head.par_chunks_mut(4))
-            .zip(c_head.par_chunks_mut(4))
             .enumerate()
-            .map(|(j, ((a_chunk, b_chunk), c_chunk))| {
-              let a0: Vec<E::Scalar> = a_chunk[0].iter().zip(a_chunk[1].iter())
-                .map(|(l, h)| l + prev_r_b * (h - l)).to_vec();
-              let a2: Vec<E::Scalar> = a_chunk[2].iter().zip(a_chunk[3].iter())
-                .map(|(l, h)| l + prev_r_b * (h - l)).to_vec();
+            .map(|(j, z_chunk)| {
+              let folded_z0 = 
+                z_chunk[0].iter().zip(z_chunk[1].iter()).map(|(l, h)| {
+                  l + prev_r_b * (h - l)
+                }).to_vec();
+              let (a0, b0, c0) = S.multiply_vec(&folded_z0).unwrap();
 
-              let b0: Vec<E::Scalar> = b_chunk[0].iter().zip(b_chunk[1].iter())
-                .map(|(l, h)| l + prev_r_b * (h - l)).to_vec();
-              let b2: Vec<E::Scalar> = b_chunk[2].iter().zip(b_chunk[3].iter())
-                .map(|(l, h)| l + prev_r_b * (h - l)).to_vec();
-
-              let c0: Vec<E::Scalar> = c_chunk[0].iter().zip(c_chunk[1].iter())
-                .map(|(l, h)| l + prev_r_b * (h - l)).to_vec();
-              let c2: Vec<E::Scalar> = c_chunk[2].iter().zip(c_chunk[3].iter())
-                .map(|(l, h)| l + prev_r_b * (h - l)).to_vec();
+              let folded_z2 = 
+                z_chunk[2].iter().zip(z_chunk[3].iter()).map(|(l, h)| {
+                  l + prev_r_b * (h - l)
+                }).to_vec();
+              let (a2, b2, c2) = S.multiply_vec(&folded_z2).unwrap();
 
               let (e0, qc) = Self::prove_helper_mem(
                 t, (left, right), e_eq_ref,
                 &a0, &b0, &c0, &a2, &b2,
               );
               let w = suffix_weight_full::<E::Scalar>(t, ell_b, j, rhos_ref);
-              (e0 * w, qc * w, j, a0, a2, b0, b2, c0, c2)
+              (e0 * w, qc * w, j, a0, a2, b0, b2, c0, c2, folded_z0, folded_z2)
             })
             .collect();
 
-          for (e0_w, qc_w, j, a0, a2, b0, b2, c0, c2) in chunk_results {
+          for (e0_w, qc_w, j, a0, a2, b0, b2, c0, c2, z0, z2) in chunk_results {
             e0_acc += e0_w;
             quad_acc += qc_w;
             A_layers_mem[2 * j] = a0;
@@ -656,12 +632,10 @@ where
             B_layers_mem[2 * j + 1] = b2;
             C_layers_mem[2 * j] = c0;
             C_layers_mem[2 * j + 1] = c2;
+            Z_layers_mem[2 * j] = z0;
+            Z_layers_mem[2 * j + 1] = z2;
           }
         }
-
-        A_layers.clear();
-        B_layers.clear();
-        C_layers.clear();
 
         m = fold_pairs;
         prev_r_b = finish_round!(t, e0_acc, quad_acc);
@@ -795,7 +769,8 @@ where
     // }
 
     let (_fold_final_span, fold_final_t) = start_span!("fold_witnesses");
-    let folded_W = R1CSWitness::fold_multiple_streaming(&r_bs, &Ws_r_W, &Ws_W)?;
+    let instance_length = Us[0].X.len();
+    let folded_W = R1CSWitness::fold_multiple_streaming(&r_bs, &Ws_r_W, &Z_layers_mem, instance_length)?;
     // if use_truncated_fold {
     //   let full_dim = S.num_shared + S.num_precommitted + S.num_rest;
     //   folded_W.W.resize(full_dim, E::Scalar::ZERO);
@@ -835,19 +810,9 @@ where
     let folded_U = R1CSInstance::<E>::new_unchecked(comm_acc, X_acc)?;
     info!(elapsed_ms = %fold_final_t.elapsed().as_millis(), "fold_instances");
 
-    let (az_out, bz_out, cz_out) = if ell_b > 1 {
-      (
-        std::mem::take(&mut A_layers_mem[0]),
-        std::mem::take(&mut B_layers_mem[0]),
-        std::mem::take(&mut C_layers_mem[0]),
-      )
-    } else {
-      (
-        std::mem::take(&mut A_layers[0]).into_vec(),
-        std::mem::take(&mut B_layers[0]).into_vec(),
-        std::mem::take(&mut C_layers[0]).into_vec(),
-      )
-    };
+    let az_out = std::mem::take(&mut A_layers_mem[0]);
+    let bz_out = std::mem::take(&mut B_layers_mem[0]);
+    let cz_out = std::mem::take(&mut C_layers_mem[0]);
 
     Ok((E_eq, az_out, bz_out, cz_out, folded_W, folded_U))
   }
@@ -1129,19 +1094,18 @@ where
 
             let regular_instance = split_instance.to_regular_instance()?;
 
-            let mut z = Vec::with_capacity(witness.W.len() + 1 + regular_instance.X.len());
-            z.extend_from_slice(&witness.W);
-            z.push(E::Scalar::ONE);
-            z.extend_from_slice(&regular_instance.X);
-            let (av_fv, bv_fv, cv_fv) =
-              from_iter(pk.S_step.multiply_vec_iter(&z)?).unzip3();
-
             let R1CSWitness { W, r_W, is_small: _ } = witness;
             // TODO: Make this stylistically look like Pratyush's code.
             // TODO: should be able to do a non-owning iter and move it up to get a bit more interleaving.
-            let w_fv = from_iter(W.into_iter()).to_file_vec();
+            
+            let mut z = Vec::with_capacity(W.len() + 1 + regular_instance.X.len());
+            z.extend_from_slice(&W);
+            z.push(E::Scalar::ONE);
+            z.extend_from_slice(&regular_instance.X);
+            
+            let z_fv = from_iter(z.into_iter()).to_file_vec();
 
-            Ok((split_instance, r_W, w_fv, regular_instance, av_fv, bv_fv, cv_fv))
+            Ok((split_instance, r_W, z_fv, regular_instance))
           })
           .collect()
       },
@@ -1181,24 +1145,13 @@ where
     // Unpack step results and pad A/B/C layers to n_padded (cloning from index 0).
     let mut step_instances = Vec::with_capacity(n);
     let mut step_witness_blinds = Vec::with_capacity(n);
-    let mut step_witnesses: Vec<scribe_streams::file_vec::FileVec<E::Scalar>> = Vec::with_capacity(n);
+    let mut step_vectors: Vec<scribe_streams::file_vec::FileVec<E::Scalar>> = Vec::with_capacity(n);
     let mut step_instances_regular = Vec::with_capacity(n);
-    let mut A_layers: Vec<scribe_streams::file_vec::FileVec<E::Scalar>> = Vec::with_capacity(n_padded);
-    let mut B_layers: Vec<scribe_streams::file_vec::FileVec<E::Scalar>> = Vec::with_capacity(n_padded);
-    let mut C_layers: Vec<scribe_streams::file_vec::FileVec<E::Scalar>> = Vec::with_capacity(n_padded);
-    for (si, r_W, w_fv, ri, av_fv, bv_fv, cv_fv) in step_tuples {
+    for (si, r_W, z_fv, ri) in step_tuples {
       step_instances.push(si);
       step_witness_blinds.push(r_W);
-      step_witnesses.push(w_fv);
+      step_vectors.push(z_fv);
       step_instances_regular.push(ri);
-      A_layers.push(av_fv);
-      B_layers.push(bv_fv);
-      C_layers.push(cv_fv);
-    }
-    for _ in n..n_padded {
-      A_layers.push(scribe_streams::file_vec::FileVec::clone(&A_layers[0]));
-      B_layers.push(scribe_streams::file_vec::FileVec::clone(&B_layers[0]));
-      C_layers.push(scribe_streams::file_vec::FileVec::clone(&C_layers[0]));
     }
 
     // NIFS transcript: absorb core instance, then NIFS will absorb step instances.
@@ -1212,10 +1165,7 @@ where
       &pk.ck,
       step_instances_regular,
       step_witness_blinds,
-      step_witnesses,
-      A_layers,
-      B_layers,
-      C_layers,
+      step_vectors,
       &mut vc,
       &mut vc_state,
       &pk.vc_shape,
@@ -1792,106 +1742,106 @@ where
 
 #[cfg(test)]
 mod tests {
-  use super::*;
-  use crate::provider::T256HyraxEngine;
-  use bellpepper::gadgets::{
-    boolean::{AllocatedBit, Boolean},
-    num::AllocatedNum,
-    sha256::sha256,
-  };
-  use bellpepper_core::{ConstraintSystem, SynthesisError};
-  use core::marker::PhantomData;
+  // use super::*;
+  // // use crate::provider::T256HyraxEngine;
+  // use bellpepper::gadgets::{
+  //   boolean::{AllocatedBit, Boolean},
+  //   num::AllocatedNum,
+  //   sha256::sha256,
+  // };
+  // use bellpepper_core::{ConstraintSystem, SynthesisError};
+  // use core::marker::PhantomData;
 
-  #[derive(Clone, Debug)]
-  struct Sha256Circuit<E: Engine> {
-    preimage: Vec<u8>,
-    _p: PhantomData<E>,
-  }
+  // #[derive(Clone, Debug)]
+  // struct Sha256Circuit<E: Engine> {
+  //   preimage: Vec<u8>,
+  //   _p: PhantomData<E>,
+  // }
 
-  impl<E: Engine> SpartanCircuit<E> for Sha256Circuit<E> {
-    fn public_values(&self) -> Result<Vec<E::Scalar>, SynthesisError> {
-      Ok(vec![E::Scalar::ZERO]) // Placeholder, we don't use public values in this example
-    }
+  // impl<E: Engine> SpartanCircuit<E> for Sha256Circuit<E> {
+  //   fn public_values(&self) -> Result<Vec<E::Scalar>, SynthesisError> {
+  //     Ok(vec![E::Scalar::ZERO]) // Placeholder, we don't use public values in this example
+  //   }
 
-    fn shared<CS: ConstraintSystem<E::Scalar>>(
-      &self,
-      _: &mut CS,
-    ) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError> {
-      Ok(vec![]) // Placeholder, we don't use shared variables in this example
-    }
+  //   fn shared<CS: ConstraintSystem<E::Scalar>>(
+  //     &self,
+  //     _: &mut CS,
+  //   ) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError> {
+  //     Ok(vec![]) // Placeholder, we don't use shared variables in this example
+  //   }
 
-    fn precommitted<CS: ConstraintSystem<E::Scalar>>(
-      &self,
-      _: &mut CS,
-      _: &[AllocatedNum<E::Scalar>],
-    ) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError> {
-      Ok(vec![]) // Placeholder, we don't use precommitted variables in this example
-    }
+  //   fn precommitted<CS: ConstraintSystem<E::Scalar>>(
+  //     &self,
+  //     _: &mut CS,
+  //     _: &[AllocatedNum<E::Scalar>],
+  //   ) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError> {
+  //     Ok(vec![]) // Placeholder, we don't use precommitted variables in this example
+  //   }
 
-    fn num_challenges(&self) -> usize {
-      0 // Placeholder, we don't use challenges in this example
-    }
+  //   fn num_challenges(&self) -> usize {
+  //     0 // Placeholder, we don't use challenges in this example
+  //   }
 
-    fn synthesize<CS: ConstraintSystem<E::Scalar>>(
-      &self,
-      cs: &mut CS,
-      _shared: &[AllocatedNum<E::Scalar>],
-      _precommitted: &[AllocatedNum<E::Scalar>],
-      _challenges: Option<&[E::Scalar]>, // challenges from the verifier
-    ) -> Result<(), SynthesisError> {
-      // we write a circuit that checks if the input is a SHA256 preimage
-      let bit_values: Vec<_> = self
-        .preimage
-        .clone()
-        .into_iter()
-        .flat_map(|byte| (0..8).map(move |i| (byte >> i) & 1u8 == 1u8))
-        .map(Some)
-        .collect();
-      assert_eq!(bit_values.len(), self.preimage.len() * 8);
+  //   fn synthesize<CS: ConstraintSystem<E::Scalar>>(
+  //     &self,
+  //     cs: &mut CS,
+  //     _shared: &[AllocatedNum<E::Scalar>],
+  //     _precommitted: &[AllocatedNum<E::Scalar>],
+  //     _challenges: Option<&[E::Scalar]>, // challenges from the verifier
+  //   ) -> Result<(), SynthesisError> {
+  //     // we write a circuit that checks if the input is a SHA256 preimage
+  //     let bit_values: Vec<_> = self
+  //       .preimage
+  //       .clone()
+  //       .into_iter()
+  //       .flat_map(|byte| (0..8).map(move |i| (byte >> i) & 1u8 == 1u8))
+  //       .map(Some)
+  //       .collect();
+  //     assert_eq!(bit_values.len(), self.preimage.len() * 8);
 
-      let preimage_bits = bit_values
-        .into_iter()
-        .enumerate()
-        .map(|(i, b)| AllocatedBit::alloc(cs.namespace(|| format!("preimage bit {i}")), b))
-        .map(|b| b.map(Boolean::from))
-        .collect::<Result<Vec<_>, _>>()?;
+  //     let preimage_bits = bit_values
+  //       .into_iter()
+  //       .enumerate()
+  //       .map(|(i, b)| AllocatedBit::alloc(cs.namespace(|| format!("preimage bit {i}")), b))
+  //       .map(|b| b.map(Boolean::from))
+  //       .collect::<Result<Vec<_>, _>>()?;
 
-      let _ = sha256(cs.namespace(|| "sha256"), &preimage_bits)?;
+  //     let _ = sha256(cs.namespace(|| "sha256"), &preimage_bits)?;
 
-      let x = AllocatedNum::alloc(cs.namespace(|| "x"), || Ok(E::Scalar::ZERO))?;
-      x.inputize(cs.namespace(|| "inputize x"))?;
+  //     let x = AllocatedNum::alloc(cs.namespace(|| "x"), || Ok(E::Scalar::ZERO))?;
+  //     x.inputize(cs.namespace(|| "inputize x"))?;
 
-      Ok(())
-    }
-  }
+  //     Ok(())
+  //   }
+  // }
 
-  fn generate_sha_r1cs<E: Engine>(
-    num_circuits: usize,
-    len: usize,
-  ) -> (
-    NeutronNovaProverKey<E>,
-    NeutronNovaVerifierKey<E>,
-    Vec<Sha256Circuit<E>>,
-  )
-  where
-    E::PCS: FoldingEngineTrait<E>, // Ensure that the PCS supports folding
-  {
-    let circuit = Sha256Circuit::<E> {
-      preimage: vec![0u8; len],
-      _p: Default::default(),
-    };
+  // fn generate_sha_r1cs<E: Engine>(
+  //   num_circuits: usize,
+  //   len: usize,
+  // ) -> (
+  //   NeutronNovaProverKey<E>,
+  //   NeutronNovaVerifierKey<E>,
+  //   Vec<Sha256Circuit<E>>,
+  // )
+  // where
+  //   E::PCS: FoldingEngineTrait<E>, // Ensure that the PCS supports folding
+  // {
+  //   let circuit = Sha256Circuit::<E> {
+  //     preimage: vec![0u8; len],
+  //     _p: Default::default(),
+  //   };
 
-    let (pk, vk) = NeutronNovaZkSNARK::<E>::setup(&circuit, &circuit, num_circuits).unwrap();
+  //   let (pk, vk) = NeutronNovaZkSNARK::<E>::setup(&circuit, &circuit, num_circuits).unwrap();
 
-    let circuits = (0..num_circuits)
-      .map(|i| Sha256Circuit::<E> {
-        preimage: vec![i as u8; len],
-        _p: Default::default(),
-      })
-      .collect::<Vec<_>>();
+  //   let circuits = (0..num_circuits)
+  //     .map(|i| Sha256Circuit::<E> {
+  //       preimage: vec![i as u8; len],
+  //       _p: Default::default(),
+  //     })
+  //     .collect::<Vec<_>>();
 
-    (pk, vk, circuits)
-  }
+  //   (pk, vk, circuits)
+  // }
 
   // fn test_neutron_inner<E: Engine, C1: SpartanCircuit<E>, C2: SpartanCircuit<E>>(
   //   name: &str,
@@ -1923,27 +1873,27 @@ mod tests {
   //   assert_eq!(public_values_step.len(), step_circuits.len());
   // }
 
-  #[test]
-  fn test_neutron_sha256() {
-    let _ = tracing_subscriber::fmt()
-      .with_target(false)
-      .with_ansi(true)
-      .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-      .try_init();
+  // #[test]
+  // fn test_neutron_sha256() {
+  //   let _ = tracing_subscriber::fmt()
+  //     .with_target(false)
+  //     .with_ansi(true)
+  //     .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+  //     .try_init();
 
-    type E = T256HyraxEngine;
+  //   type E = T256HyraxEngine;
 
-    for num_circuits in [2, 7, 32, 64] {
-      for len in [32, 64].iter() {
-        let (pk, vk, circuits) = generate_sha_r1cs::<E>(num_circuits, *len);
-        test_neutron_inner(
-          &format!("sha256_num_circuits={num_circuits}_len={len}"),
-          &pk,
-          &vk,
-          &circuits,
-          &circuits[0], // core circuit is the first one, for test purposes
-        );
-      }
-    }
-  }
+  //   for num_circuits in [2, 7, 32, 64] {
+  //     for len in [32, 64].iter() {
+  //       let (pk, vk, circuits) = generate_sha_r1cs::<E>(num_circuits, *len);
+  //       test_neutron_inner(
+  //         &format!("sha256_num_circuits={num_circuits}_len={len}"),
+  //         &pk,
+  //         &vk,
+  //         &circuits,
+  //         &circuits[0], // core circuit is the first one, for test purposes
+  //       );
+  //     }
+  //   }
+  // }
 }

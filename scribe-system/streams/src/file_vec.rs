@@ -327,6 +327,83 @@ impl<T: SerializeRaw + DeserializeRaw> FileVec<T> {
         }
     }
 
+    /// Like [`from_batched_iter_with_prefix`] but simultaneously accumulates all elements into a
+    /// `Vec<T>`, avoiding a second pass over the file. Returns `(vec, file_vec)`.
+    pub fn vec_file_vec_from_batched_iter_with_prefix(
+        iter: impl IntoBatchedIterator<Item = T>,
+        prefix: impl AsRef<OsStr>,
+    ) -> (Vec<T>, Self)
+    where
+        T: Send + Sync + Debug + Clone,
+    {
+        let prefix = [prefix.as_ref().to_str().unwrap(), "from_batched_iter"].join("_");
+        let mut iter = iter.into_batched_iter();
+        let mut buffer = Vec::with_capacity(2 * BUFFER_SIZE);
+        let total_len = iter.len();
+        let file_length = total_len.map(|s| s * T::SIZE);
+        let mut vec_result: Vec<T> = Vec::with_capacity(total_len.unwrap_or(0));
+        let mut file = None;
+        let size = T::SIZE;
+
+        let mut byte_buffer = None;
+        let mut more_than_one_batch = false;
+        let mut batch_is_larger_than_buffer = false;
+        if let Some(batch) = iter.next_batch() {
+            buffer.par_extend(batch);
+
+            if buffer.len() > BUFFER_SIZE {
+                batch_is_larger_than_buffer = true;
+                byte_buffer = Some(avec![0u8; buffer.len() * size]);
+                let mut f = InnerFile::new_temp(&prefix);
+                if let Some(l) = file_length {
+                    f.allocate_space(l).unwrap();
+                }
+                file = Some(f);
+            }
+        } else {
+            return (vec![], FileVec::Buffer { buffer });
+        }
+        assert!(!buffer.is_empty());
+
+        while let Some(batch) = iter.next_batch() {
+            if buffer.len() < BUFFER_SIZE {
+                buffer.par_extend(batch);
+            } else {
+                if !more_than_one_batch {
+                    byte_buffer = Some(avec![0u8; buffer.len() * size]);
+                }
+                if file.is_none() {
+                    let mut f = InnerFile::new_temp(&prefix);
+                    if let Some(l) = file_length {
+                        f.allocate_space(l).unwrap();
+                    }
+                    file = Some(f);
+                }
+                let byte_buffer = byte_buffer.as_mut().unwrap();
+                let file = file.as_mut().unwrap();
+
+                more_than_one_batch = true;
+                T::serialize_raw_batch(&buffer, byte_buffer, &*file).unwrap();
+                vec_result.extend_from_slice(&buffer);
+                buffer.clear();
+                buffer.par_extend(batch);
+            }
+        }
+
+        if more_than_one_batch || batch_is_larger_than_buffer {
+            let byte_buffer = byte_buffer.as_mut().unwrap();
+            let mut file = file.unwrap();
+            T::serialize_raw_batch(&buffer, byte_buffer, &file).unwrap();
+            vec_result.extend_from_slice(&buffer);
+            file.flush().expect("failed to flush file");
+            file.rewind().expect("failed to seek file");
+            (vec_result, Self::File(file))
+        } else {
+            vec_result.extend_from_slice(&buffer);
+            (vec_result, FileVec::Buffer { buffer })
+        }
+    }
+
     pub fn from_batched_iter(iter: impl IntoBatchedIterator<Item = T>) -> Self
     where
         T: Send + Sync + Debug,
