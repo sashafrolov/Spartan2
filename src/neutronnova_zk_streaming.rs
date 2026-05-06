@@ -380,7 +380,7 @@ where
       Us.extend(vec![Us[0].clone(); n_padded - n]);
       Ws_r_W.extend(vec![Ws_r_W[0].clone(); n_padded - n]);
       for _ in n..n_padded {
-        Zs.push(scribe_streams::file_vec::FileVec::clone(&Zs[0]));
+        Zs.push(Zs[0].deep_copy());
       }
     }
     let (_absorb_span, absorb_t) = start_span!("transcript_operations");
@@ -453,10 +453,10 @@ where
         .par_chunks(2)
         .enumerate()
         .map(|(pair_idx, pair_z)| {
-          let z0 = FileVec::clone(&pair_z[0]).into_vec();
+          let z0 = pair_z[0].iter().to_vec();
           let (a0, b0, c0) = S.multiply_vec(&z0).unwrap();
 
-          let z1 = FileVec::clone(&pair_z[0]).into_vec();
+          let z1 = pair_z[1].iter().to_vec();
           let (a1, b1) = S.multiply_vec_no_cz(&z1).unwrap();          
 
           // In progress. Don't worry about build.
