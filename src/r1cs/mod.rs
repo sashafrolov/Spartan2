@@ -686,15 +686,16 @@ impl<E: Engine> R1CSWitness<E> {
       });
     }
 
-    if w_full.len() != witness_n {
+    if w_partial.len() != witness_n {
       return Err(SpartanError::InvalidInputLength {
         reason: "fold_multiple_streaming: weights length mismatch".into(),
       });
     }
 
     let dim = Zs[0].len() - non_w_length;
+    let z0_len = Zs[0].len();
 
-    if !Zs.iter().all(|z| z.len() == dim) {
+    if !Zs.iter().all(|z| z.len() == z0_len) {
       return Err(SpartanError::InvalidInputLength {
         reason: "fold_multiple_streaming: all W vectors must have the same length".into(),
       });
