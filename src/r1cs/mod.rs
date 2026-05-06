@@ -716,7 +716,7 @@ impl<E: Engine> R1CSWitness<E> {
               <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
                 &mut acc,
                 &wi,
-                &Zs[i][non_w_length + start + j],
+                &Zs[i][start + j],
               );
             }
             *acc_blk_j = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc);
