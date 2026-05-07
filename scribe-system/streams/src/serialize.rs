@@ -12,7 +12,7 @@ use ark_ec::{
 use ark_ff::{AdditiveGroup, BigInt, Field, Fp, FpConfig, PrimeField};
 use ark_serialize::{Read, Write};
 
-use crate::file_vec::backend::ReadN;
+use crate::file_vec::backend::{PAGE_SIZE, ReadN};
 
 use super::file_vec::AVec;
 
@@ -50,6 +50,36 @@ pub trait SerializeRaw: Sized {
             });
         file.write_all(work_buffer)?;
         Ok(())
+    }
+
+    fn serialize_raw_batch_padded(
+        result_buffer: &[Self],
+        work_buffer: &mut AVec,
+        mut file: impl crate::file_vec::WriteAligned,
+    ) -> Result<usize, io::Error>
+    where
+        Self: Sync + Send + Sized,
+    {
+        if result_buffer.is_empty() {
+            return Ok(0);
+        }
+        work_buffer.clear();
+        let n = result_buffer.len() * Self::SIZE;
+        let n_padded = n.next_multiple_of(PAGE_SIZE);
+        work_buffer.reserve(n_padded);
+        unsafe {
+            work_buffer.set_len(n_padded);
+        }
+        work_buffer.fill(0);
+        work_buffer[..n]
+            .par_chunks_mut(Self::SIZE)
+            .zip(result_buffer)
+            .with_min_len(1 << 8)
+            .for_each(|(mut chunk, val)| {
+                val.serialize_raw(&mut chunk).unwrap();
+            });
+        file.write_all(work_buffer)?;
+        Ok(n)
     }
 }
 

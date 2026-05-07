@@ -35,13 +35,13 @@ impl ReadN for &mut InnerFile {
         unsafe {
             dest.set_len(0);
         }
-        dest.reserve(n);
-        // Safety: `dest` is empty and has capacity `n`.
+        let n_padded = n.next_multiple_of(PAGE_SIZE);
+        dest.reserve(n_padded);
+        // Safety: `dest` is empty and has capacity at least `n_padded`.
         unsafe {
-            dest.set_len(n);
+            dest.set_len(n_padded);
         }
         // dest.fill(0);
-        debug_assert_eq!(dest.len() % PAGE_SIZE, 0);
         let n = (&self.file).read(&mut dest[..])?;
         dest.truncate(n);
         Ok(())
@@ -59,13 +59,13 @@ impl ReadN for &InnerFile {
         unsafe {
             dest.set_len(0);
         }
-        dest.reserve(n);
-        // Safety: `dest` is empty and has capacity `n`.
+        let n_padded = n.next_multiple_of(PAGE_SIZE);
+        dest.reserve(n_padded);
+        // Safety: `dest` is empty and has capacity at least `n_padded`.
         unsafe {
-            dest.set_len(n);
+            dest.set_len(n_padded);
         }
         dest.fill(0);
-        debug_assert_eq!(dest.len() % PAGE_SIZE, 0);
         let n = (&self.file).read(&mut dest[..])?;
         dest.truncate(n);
         Ok(())
@@ -264,6 +264,10 @@ impl InnerFile {
 
     pub fn position(&self) -> usize {
         (&self.file).stream_position().unwrap() as usize
+    }
+
+    pub fn truncate(&self, len: u64) -> io::Result<()> {
+        self.file.set_len(len)
     }
 
     pub fn is_empty(&self) -> bool {
