@@ -203,14 +203,14 @@ impl InnerFile {
         {
             // Ran into an issue here with Zaratan. Zaratan's fancy HPC FS doesn't support
             // this file allocation flag. Need to uncomment this if returning to run on an SSD though.
-            // use libc::{FALLOC_FL_KEEP_SIZE, fallocate};
-            // let result = unsafe { fallocate(fd, FALLOC_FL_KEEP_SIZE, 0, len as i64) };
-            // if result == 0 {
-            //     Ok(())
-            // } else {
-            //     Err(io::Error::last_os_error())
-            // }
-            Ok(())
+            use libc::{FALLOC_FL_KEEP_SIZE, fallocate};
+            let result = unsafe { fallocate(fd, FALLOC_FL_KEEP_SIZE, 0, len as i64) };
+            if result == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+            // Ok(())
         }
         #[cfg(any(target_os = "macos", target_os = "ios"))]
         {
