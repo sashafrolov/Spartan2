@@ -42,17 +42,28 @@ use crate::{
   },
   sumcheck::SumcheckProof,
   traits::{
-    Engine,
+    Engine, Group,
     circuit::SpartanCircuit,
     pcs::{FoldingEngineTrait, PCSEngineTrait},
     snark::{DigestHelperTrait, SpartanDigest},
-    transcript::TranscriptEngineTrait,
+    transcript::{TranscriptEngineTrait, TranscriptReprTrait},
   },
   zk::NeutronNovaVerifierCircuit,
 };
 use ff::Field;
 use once_cell::sync::OnceCell;
 use rayon::prelude::*;
+use sha3::{Digest, Keccak256};
+
+/// Pre-computed keccak hash. Used to parallelize the work of hashing polynomial commitments
+/// to avoid a serial bottleneck in challenge computation.
+struct InstanceHash([u8; 32]);
+
+impl<G: Group> TranscriptReprTrait<G> for InstanceHash {
+  fn to_transcript_bytes(&self) -> Vec<u8> {
+    self.0.to_vec()
+  }
+}
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
@@ -346,10 +357,11 @@ where
     mut Ws_r_W: Vec<<E::PCS as PCSEngineTrait<E>>::Blind>,
     mut Zs: Vec<scribe_streams::file_vec::FileVec<E::Scalar>>,
     vc: &mut NeutronNovaVerifierCircuit<E>,
-    vc_state: &mut <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::MultiRoundState, // wrapper circuit, fine
-    vc_shape: &SplitMultiRoundR1CSShape<E>, // wrapper circuit, fine
-    vc_ck: &CommitmentKey<E>, // wrapper circuit related, fine
-    transcript: &mut E::TE, // just a hash
+    vc_state: &mut <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::MultiRoundState,
+    vc_shape: &SplitMultiRoundR1CSShape<E>,
+    vc_ck: &CommitmentKey<E>,
+    transcript: &mut E::TE,
+    mut instance_hashes: Vec<[u8; 32]>,
   ) -> Result<
     (
       Vec<E::Scalar>,  // E_eq (split evals, length left+right)
@@ -382,10 +394,12 @@ where
       for _ in n..n_padded {
         Zs.push(Zs[0].deep_copy());
       }
+      let first_hash = instance_hashes[0];
+      instance_hashes.extend(std::iter::repeat(first_hash).take(n_padded - n));
     }
     let (_absorb_span, absorb_t) = start_span!("transcript_operations");
-    for U in Us.iter() {
-      transcript.absorb(b"U", U);
+    for h in instance_hashes.iter() {
+      transcript.absorb(b"U", &InstanceHash(*h));
     }
     let T = E::Scalar::ZERO;
     transcript.absorb(b"T", &T);
@@ -1105,7 +1119,13 @@ where
             
             let z_fv = from_iter(z.into_iter()).to_file_vec();
 
-            Ok((split_instance, r_W, z_fv, regular_instance))
+            let instance_hash: [u8; 32] = {
+              let mut h = Keccak256::new();
+              h.update(regular_instance.to_transcript_bytes());
+              h.finalize().into()
+            };
+
+            Ok((split_instance, r_W, z_fv, regular_instance, instance_hash))
           })
           .collect()
       },
@@ -1147,11 +1167,13 @@ where
     let mut step_witness_blinds = Vec::with_capacity(n);
     let mut step_vectors: Vec<scribe_streams::file_vec::FileVec<E::Scalar>> = Vec::with_capacity(n);
     let mut step_instances_regular = Vec::with_capacity(n);
-    for (si, r_W, z_fv, ri) in step_tuples {
+    let mut instance_hashes: Vec<[u8; 32]> = Vec::with_capacity(n);
+    for (si, r_W, z_fv, ri, hash) in step_tuples {
       step_instances.push(si);
       step_witness_blinds.push(r_W);
       step_vectors.push(z_fv);
       step_instances_regular.push(ri);
+      instance_hashes.push(hash);
     }
 
     // NIFS transcript: absorb core instance, then NIFS will absorb step instances.
@@ -1171,6 +1193,7 @@ where
       &pk.vc_shape,
       &pk.vc_ck,
       &mut transcript,
+      instance_hashes,
     )?;
     info!(elapsed_ms = %nifs_t.elapsed().as_millis(), "NIFS");
 
@@ -1501,9 +1524,10 @@ where
     }
 
     // Reconstruct step instances and core instance with the shared commitment
+    let (_clone_span, clone_t) = start_span!("clone_commitments");
     let step_instances: Vec<SplitR1CSInstance<E>> = self
       .step_instances
-      .iter()
+      .par_iter()
       .map(|u| {
         let mut u = u.clone();
         u.comm_W_shared = self.comm_W_shared.clone();
@@ -1512,31 +1536,34 @@ where
       .collect();
     let mut core_instance = self.core_instance.clone();
     core_instance.comm_W_shared = self.comm_W_shared.clone();
+    info!(elapsed_ms = %clone_t.elapsed().as_millis(), "clone_commitments");
 
     // validate the step instances
     let (_validate_span, validate_t) =
       start_span!("validate_instances", instances = step_instances.len());
-    for (i, u) in step_instances.iter().enumerate() {
-      let mut transcript = E::TE::new(b"neutronnova_prove");
-      transcript.absorb(b"vk", &vk.digest()?);
-      transcript.absorb(
-        b"num_circuits",
-        &E::Scalar::from(step_instances.len() as u64),
-      );
-      transcript.absorb(b"circuit_index", &E::Scalar::from(i as u64));
-      // absorb the public IO into the transcript
-      transcript.absorb(b"public_values", &u.public_values.as_slice());
-
-      u.validate(&vk.S_step, &mut transcript)?;
-    }
-
-    // validate the core instance
-    let mut transcript = E::TE::new(b"neutronnova_prove");
-    transcript.absorb(b"vk", &vk.digest()?);
-    // absorb the public IO into the transcript
-    transcript.absorb(b"public_values", &core_instance.public_values.as_slice());
-
-    core_instance.validate(&vk.S_core, &mut transcript)?;
+    let (step_val_result, core_val_result) = rayon::join(
+      || -> Result<(), SpartanError> {
+        step_instances.par_iter().enumerate().try_for_each(|(i, u)| {
+          let mut transcript = E::TE::new(b"neutronnova_prove");
+          transcript.absorb(b"vk", &vk.digest()?);
+          transcript.absorb(
+            b"num_circuits",
+            &E::Scalar::from(step_instances.len() as u64),
+          );
+          transcript.absorb(b"circuit_index", &E::Scalar::from(i as u64));
+          transcript.absorb(b"public_values", &u.public_values.as_slice());
+          u.validate(&vk.S_step, &mut transcript)
+        })
+      },
+      || -> Result<(), SpartanError> {
+        let mut transcript = E::TE::new(b"neutronnova_prove");
+        transcript.absorb(b"vk", &vk.digest()?);
+        transcript.absorb(b"public_values", &core_instance.public_values.as_slice());
+        core_instance.validate(&vk.S_core, &mut transcript)
+      },
+    );
+    step_val_result?;
+    core_val_result?;
     info!(elapsed_ms = %validate_t.elapsed().as_millis(), instances = step_instances.len(), "validate_instances");
 
     // shared commitment consistency was enforced at construction -- all step instances share comm_W_shared
@@ -1567,11 +1594,20 @@ where
     // We start a new transcript for the NeutronNova NIFS proof
     let mut transcript = E::TE::new(b"neutronnova_prove");
 
+    let (_absorb_span, absorb_t) = start_span!("transcript_operations");
     // absorb the verifier key and instances
     transcript.absorb(b"vk", &vk.digest()?);
     transcript.absorb(b"core_instance", &core_instance_regular);
-    for U in step_instances_regular.iter() {
-      transcript.absorb(b"U", U);
+    let instance_hashes: Vec<[u8; 32]> = step_instances_regular
+      .par_iter()
+      .map(|U| {
+        let mut h = Keccak256::new();
+        h.update(U.to_transcript_bytes());
+        h.finalize().into()
+      })
+      .collect();
+    for h in instance_hashes.iter() {
+      transcript.absorb(b"U", &InstanceHash(*h));
     }
     transcript.absorb(b"T", &E::Scalar::ZERO); // we always have T=0 in NeutronNova
 
@@ -1586,6 +1622,7 @@ where
     let rhos = (0..num_rounds_b)
       .map(|_| transcript.squeeze(b"rho"))
       .collect::<Result<Vec<_>, _>>()?;
+    info!(elapsed_ms = %absorb_t.elapsed().as_millis(), "transcript_operations");
 
     // validate the provided multi-round verifier instance and advance transcript
     let (_u_verifier_validate_span, u_verifier_validate_t) = start_span!("u_verifier_validate");
