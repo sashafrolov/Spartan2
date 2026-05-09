@@ -1,7 +1,7 @@
 // NeutronNova Freivalds editing. Fold a bunch of keyframe proofs together.
 //
 // Run with:
-//   RUST_LOG=neutron_nova_video_editing=info,spartan2::neutronnova_zk=info RUSTFLAGS="-C target-cpu=native" cargo run --example neutron_nova_video_editing --release
+//   RUST_LOG=neutron_nova_video_editing=info,spartan2::neutronnova_zk_ram_optimized=info RUSTFLAGS="-C target-cpu=native" cargo run --example neutron_nova_video_editing --release
 // The RUST_LOG is because the Spartan library has a bunch of unnecessary print statements for large
 // circuits internally.
 
@@ -14,10 +14,11 @@ mod dummy_circuit;
 use dummy_circuit::DummyCircuit;
 use freivalds_conv_circuit::{ExampleVideoEditCircuit, generate_random_image};
 use spartan2::{
-  neutronnova_zk::NeutronNovaZkSNARK,
+  neutronnova_zk_ram_optimized::NeutronNovaZkSNARK,
   provider::T256HyraxEngine,
   traits::Engine,
 };
+use rayon::prelude::*;
 use std::time::Instant;
 use tracing::{info, info_span};
 
@@ -63,6 +64,7 @@ fn main() {
   // Build the step circuits — each represents one video frame.
   let t0 = Instant::now();
   let step_circuits: Vec<ExampleVideoEditCircuit<<E as Engine>::Scalar>> = (0..NUM_CIRCUITS)
+    .into_par_iter()
     .map(|i| ExampleVideoEditCircuit::<<E as Engine>::Scalar>::new(generate_random_image(IMAGE_DIMS, i as u64), i as u64))
     .collect();
   info!(elapsed_ms = t0.elapsed().as_millis(), "generate_witness");
@@ -70,13 +72,8 @@ fn main() {
   let core_circuit = DummyCircuit::<E>::default();
 
   let t0 = Instant::now();
-  let prep =
-    NeutronNovaZkSNARK::<E>::prep_prove(&pk, &step_circuits, &core_circuit, false).unwrap();
-  info!(elapsed_ms = t0.elapsed().as_millis(), "prep_prove");
-
-  let t0 = Instant::now();
-  let (snark, _prep) =
-    NeutronNovaZkSNARK::prove(&pk, &step_circuits, &core_circuit, prep, false).unwrap();
+  let snark =
+    NeutronNovaZkSNARK::prove(&pk, &step_circuits, &core_circuit, false).unwrap();
   info!(elapsed_ms = t0.elapsed().as_millis(), "prove");
 
   let t0 = Instant::now();
