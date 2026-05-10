@@ -1,4 +1,7 @@
-// NeutronNova Freivalds editing. Fold a bunch of keyframe proofs together.
+// NeutronNova video editing with the non streaming version. Fold a bunch of keyframe proofs together.
+// This is meant to give a baseline of the best possible throughput (generally for 128 instances on a 256 GB machine)
+// attainable from just using RAM. This is the best you can do if you care a little less about succinctness.
+// We ended up finding a bunch of optimizations to neutronnova_zk.rs as well, so this had to be made.
 //
 // Run with:
 //   RUST_LOG=neutron_nova_video_editing=info,spartan2::neutronnova_zk_ram_optimized=info RUSTFLAGS="-C target-cpu=native" cargo run --example neutron_nova_video_editing --release
@@ -6,13 +9,13 @@
 // circuits internally.
 
 #![allow(non_snake_case)]
-#[path = "circuits/freivalds_conv_circuit.rs"]
-mod freivalds_conv_circuit;
+#[path = "circuits/example_freivalds_edit_circuit.rs"]
+mod example_freivalds_edit_circuit;
 #[path = "circuits/dummy_circuit.rs"]
 mod dummy_circuit;
 
 use dummy_circuit::DummyCircuit;
-use freivalds_conv_circuit::{ExampleVideoEditCircuit, generate_random_image};
+use example_freivalds_edit_circuit::{ExampleVideoEditCircuit, generate_random_image};
 use spartan2::{
   neutronnova_zk_ram_optimized::NeutronNovaZkSNARK,
   provider::T256HyraxEngine,

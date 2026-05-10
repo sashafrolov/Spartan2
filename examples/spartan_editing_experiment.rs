@@ -3,10 +3,10 @@
 //!
 //! Run with: `RUST_LOG=info cargo run --release --example spartan_editing_experiment`
 #![allow(non_snake_case)]
-#[path = "circuits/freivalds_conv_circuit.rs"]
-mod freivalds_conv_circuit;
+#[path = "circuits/example_freivalds_edit_circuit.rs"]
+mod example_freivalds_edit_circuit;
 
-use freivalds_conv_circuit::{ExampleVideoEditCircuit, generate_random_image};
+use example_freivalds_edit_circuit::{ExampleVideoEditCircuit, generate_random_image};
 use spartan2::{
   provider::T256HyraxEngine,
   spartan::SpartanSNARK,

@@ -6,13 +6,13 @@
 // circuits internally.
 
 #![allow(non_snake_case)]
-#[path = "circuits/freivalds_conv_circuit.rs"]
-mod freivalds_conv_circuit;
+#[path = "circuits/example_freivalds_edit_circuit.rs"]
+mod example_freivalds_edit_circuit;
 #[path = "circuits/dummy_circuit.rs"]
 mod dummy_circuit;
 
 use dummy_circuit::DummyCircuit;
-use freivalds_conv_circuit::{ExampleVideoEditCircuit, generate_random_image};
+use example_freivalds_edit_circuit::{ExampleVideoEditCircuit, generate_random_image};
 use spartan2::{
   neutronnova_zk_streaming::NeutronNovaZkSNARK,
   provider::T256HyraxEngine,
