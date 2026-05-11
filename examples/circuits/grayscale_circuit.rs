@@ -16,11 +16,11 @@ pub fn generate_random_vector<Scalar: PrimeField + PrimeFieldBits>(length: usize
     .collect()
 }
 
-pub fn generate_random_image(dimensions: (usize, usize), seed: u64) -> Vec<Vec<u8>> {
+pub fn generate_random_image(dimensions: (usize, usize), seed: u64) -> Vec<Vec<(u8, u8, u8)>> {
   let (height, width) = dimensions;
   let mut rng = StdRng::seed_from_u64(seed);
   (0..height)
-    .map(|_| (0..width).map(|_| rng.next_u32() as u8).collect())
+    .map(|_| (0..width).map(|_| (rng.next_u32() as u8, rng.next_u32() as u8, rng.next_u32() as u8)).collect())
     .collect()
 }
 
@@ -32,14 +32,15 @@ pub struct GrayscaleCircuit<Scalar: PrimeField> {
   jnd_map: Vec<Vec<u8>>,
   logup_challenge_1: Scalar,
   logup_challenge_2: Scalar,
+  logup_challenge_3: Scalar,
   input_polynomial_interpolation_challenge: Scalar,
   output_polynomial_interpolation_challenge: Scalar,
   public_input_poly_eval: Scalar,
   public_output_poly_eval: Scalar,
 }
 
-impl<Scalar: PrimeField + PrimeFieldBits> ExampleVideoEditCircuit<Scalar> {
-  pub fn new(image: Vec<Vec<u8>>, index: u64) -> Self {
+impl<Scalar: PrimeField + PrimeFieldBits> GrayscaleCircuit<Scalar> {
+  pub fn new(image: Vec<Vec<(u8, u8, u8)>>, index: u64) -> Self {
     let height = image.len();
     assert!(height > 0);
     let width = image[0].len();
@@ -50,6 +51,7 @@ impl<Scalar: PrimeField + PrimeFieldBits> ExampleVideoEditCircuit<Scalar> {
     let base = (1u64 << 32) + 4 * index;
     let logup_challenge_1 = generate_random_vector(1, base + 2).remove(0);
     let logup_challenge_2 = generate_random_vector(1, base + 3).remove(0);
+    let logup_challenge_3 = generate_random_vector(1, base + 4).remove(0);
     let input_polynomial_interpolation_challenge = generate_random_vector(1, base + 1).remove(0);
     let output_polynomial_interpolation_challenge = generate_random_vector(1, base + 2).remove(0);
 
@@ -76,7 +78,11 @@ impl<Scalar: PrimeField + PrimeFieldBits> ExampleVideoEditCircuit<Scalar> {
         acc * input_polynomial_interpolation_challenge + s
       });
 
-    let edited_image = image.clone();
+    let edited_image: Vec<Vec<u8>> = image.iter().map(|row| {
+      row.iter().map(|&(r, g, b)| {
+        ((r as u32 * 299 + g as u32 * 587 + b as u32 * 114) / 1000) as u8
+      }).collect()
+    }).collect();
 
     // Evaluate the output image output interpolation. Note: this is a bit of a hack,
     // it turns out that having large public outputs leads to some bottlenecks
@@ -109,6 +115,7 @@ impl<Scalar: PrimeField + PrimeFieldBits> ExampleVideoEditCircuit<Scalar> {
       jnd_map,
       logup_challenge_1,
       logup_challenge_2,
+      logup_challenge_3,
       input_polynomial_interpolation_challenge,
       output_polynomial_interpolation_challenge,
       public_input_poly_eval,
@@ -117,7 +124,7 @@ impl<Scalar: PrimeField + PrimeFieldBits> ExampleVideoEditCircuit<Scalar> {
   }
 }
 
-impl<E: Engine> SpartanCircuit<E> for ExampleVideoEditCircuit<E::Scalar> {
+impl<E: Engine> SpartanCircuit<E> for GrayscaleCircuit<E::Scalar> {
   fn public_values(&self) -> Result<Vec<<E as Engine>::Scalar>, SynthesisError> {
     let height = self.image.len();
     assert!(height > 0);
@@ -127,6 +134,8 @@ impl<E: Engine> SpartanCircuit<E> for ExampleVideoEditCircuit<E::Scalar> {
     let mut public_vals = Vec::new();
 
     public_vals.push(self.logup_challenge_1);
+    public_vals.push(self.logup_challenge_2);
+    public_vals.push(self.logup_challenge_3);
     public_vals.push(self.input_polynomial_interpolation_challenge);
     public_vals.push(self.public_input_poly_eval);
     public_vals.push(self.output_polynomial_interpolation_challenge);
@@ -186,9 +195,9 @@ impl<E: Engine> SpartanCircuit<E> for ExampleVideoEditCircuit<E::Scalar> {
             )?;
             Ok((n0, n1, n2))
           })
-          .collect::<Result<Vec<_>, _>>()
+          .collect::<Result<Vec<_>, SynthesisError>>()
       })
-      .collect::<Result<Vec<Vec<_>>, _>>()?;
+      .collect::<Result<Vec<Vec<_>>, SynthesisError>>()?;
 
     // 2. Allocate edited_image as private.
     let mut allocated_edited_image = Vec::new();
@@ -286,9 +295,9 @@ impl<E: Engine> SpartanCircuit<E> for ExampleVideoEditCircuit<E::Scalar> {
     let mut logup_running_sum_1 = E::Scalar::ZERO;
     for (i, row) in allocated_grayscale_remainders.iter().enumerate() {
         for (j, remainder) in row.iter().enumerate() {
-            let pixel_val = self.target_image[i][j];
-            logup_multiplicities_1[pixel_val as usize] += 1;
-            let denom_val = self.logup_challenge_1 + E::Scalar::from_u128(pixel_val as u128);
+            let remainder_val = grayscale_remainders[i][j];
+            logup_multiplicities_1[remainder_val as usize] += 1;
+            let denom_val = self.logup_challenge_1 + E::Scalar::from_u128(remainder_val as u128);
             logup_running_sum_1 = logup_running_sum_1 + denom_val.invert().unwrap_or(E::Scalar::ZERO);
 
             let partial_sum_var = AllocatedNum::alloc(
@@ -372,12 +381,12 @@ impl<E: Engine> SpartanCircuit<E> for ExampleVideoEditCircuit<E::Scalar> {
 
     let mut logup_prev_2: Option<AllocatedNum<E::Scalar>> = None;
     let mut logup_running_sum_2 = E::Scalar::ZERO;
-    for (i, row) in allocated_image.iter().enumerate() {
+    for (i, row) in image_input_vars.iter().enumerate() {
         for (j, (n0, n1, n2)) in row.iter().enumerate() {
             let (val0, val1, val2) = self.image[i][j];
-            for (c, (channel_val, channel_var)) in [(val0, n0), (val1, n1), (val2, n2)].iter().enumerate() {
-                logup_multiplicities_2[*channel_val as usize] += 1;
-                let denom_val = self.logup_challenge_2 + E::Scalar::from_u128(*channel_val as u128);
+            for (c, (channel_val, channel_var)) in [(val0, n0), (val1, n1), (val2, n2)].into_iter().enumerate() {
+                logup_multiplicities_2[channel_val as usize] += 1;
+                let denom_val = self.logup_challenge_2 + E::Scalar::from_u128(channel_val as u128);
                 logup_running_sum_2 = logup_running_sum_2 + denom_val.invert().unwrap_or(E::Scalar::ZERO);
 
                 let partial_sum_var = AllocatedNum::alloc(
@@ -405,9 +414,9 @@ impl<E: Engine> SpartanCircuit<E> for ExampleVideoEditCircuit<E::Scalar> {
             }
         }
     }
-    for (i, row) in allocated_edited_image.iter().enumerate() {
-        for (j, pixel_val) in row.iter().enumerate() {
-            logup_multiplicities_2[pixel_val] += 1;
+    for (i, (alloc_row, val_row)) in allocated_edited_image.iter().zip(self.edited_image.iter()).enumerate() {
+        for (j, (pixel_var, &pixel_val)) in alloc_row.iter().zip(val_row.iter()).enumerate() {
+            logup_multiplicities_2[pixel_val as usize] += 1;
             let denom_val = self.logup_challenge_2 + E::Scalar::from_u128(pixel_val as u128);
             logup_running_sum_2 = logup_running_sum_2 + denom_val.invert().unwrap_or(E::Scalar::ZERO);
 
@@ -420,14 +429,14 @@ impl<E: Engine> SpartanCircuit<E> for ExampleVideoEditCircuit<E::Scalar> {
             cs.enforce(
                 || format!("Byte Check LogUp partial sum constraint {i} {j} edited"),
                 |lc| lc + partial_sum_var.get_variable() - prev.get_variable(),
-                |lc| lc + allocated_logup_challenge_2.get_variable() + channel_var.get_variable(),
+                |lc| lc + allocated_logup_challenge_2.get_variable() + pixel_var.get_variable(),
                 |lc| lc + CS::one(),
             );
             } else {
             cs.enforce(
                 || format!("Byte Check LogUp partial sum constraint {i} {j} edited"),
                 |lc| lc + partial_sum_var.get_variable(),
-                |lc| lc + allocated_logup_challenge_2.get_variable() + channel_var.get_variable(),
+                |lc| lc + allocated_logup_challenge_2.get_variable() + pixel_var.get_variable(),
                 |lc| lc + CS::one(),
             );
             }
@@ -488,7 +497,7 @@ impl<E: Engine> SpartanCircuit<E> for ExampleVideoEditCircuit<E::Scalar> {
         cs.enforce(
           || format!("Grayscale division check {i} {j}"),
           |lc| lc + CS::one(),
-          |lc| lc + grayscale_weighted_lcs[i][j].clone(),
+          |lc| lc + &grayscale_weighted_lcs[i][j],
           |lc| lc + (E::Scalar::from(1000u64), allocated_target_image[i][j].get_variable())
                    + remainder.get_variable(),
         );
@@ -710,8 +719,92 @@ impl<E: Engine> SpartanCircuit<E> for ExampleVideoEditCircuit<E::Scalar> {
       })
       .collect();
 
-    
+    let mut logup_multiplicities_3: Vec<u32> = vec![0u32; 512];
+    let allocated_logup_challenge_3 =
+      AllocatedNum::alloc_input(cs.namespace(|| "LogUp challenge3"), || {
+        Ok(self.logup_challenge_3)
+      })?;
 
+    let mut logup_prev_3: Option<AllocatedNum<E::Scalar>> = None;
+    let mut logup_running_sum_3 = E::Scalar::ZERO;
+    for (i, (diff_row, lc_row)) in jnd_differences.iter().zip(jnd_differences_lc.iter()).enumerate() {
+        for (j, (&diff_val, _)) in diff_row.iter().zip(lc_row.iter()).enumerate() {
+            // NOTE: diff_val is i16 and may be negative; the usize cast and from_u128 are only
+            // correct if the JND invariant guarantees diff_val >= 0 at this point.
+            logup_multiplicities_3[diff_val as usize] += 1;
+            let denom_val = self.logup_challenge_3 + E::Scalar::from_u128(diff_val as u128);
+            logup_running_sum_3 = logup_running_sum_3 + denom_val.invert().unwrap_or(E::Scalar::ZERO);
+
+            let partial_sum_var = AllocatedNum::alloc(
+            cs.namespace(|| format!("LogUp JND map difference check partial sum {i} {j}")),
+            || Ok(logup_running_sum_3),
+            )?;
+
+            if let Some(prev) = &logup_prev_3 {
+            cs.enforce(
+                || format!("LogUp JND map difference check partial sum constraint {i} {j}"),
+                |lc| lc + partial_sum_var.get_variable() - prev.get_variable(),
+                |lc| lc + allocated_logup_challenge_3.get_variable() + &jnd_differences_lc[i][j],
+                |lc| lc + CS::one(),
+            );
+            } else {
+            cs.enforce(
+                || format!("LogUp JND map difference check partial sum constraint {i} {j}"),
+                |lc| lc + partial_sum_var.get_variable(),
+                |lc| lc + allocated_logup_challenge_3.get_variable() + &jnd_differences_lc[i][j],
+                |lc| lc + CS::one(),
+            );
+            }
+
+            logup_prev_3 = Some(partial_sum_var);
+        }
+    }
+    let lhs_logup_sum_3 = logup_prev_3.unwrap();
+
+    let mut rhs_logup_prev_3: Option<AllocatedNum<E::Scalar>> = None;
+    let mut rhs_logup_running_sum_3 = E::Scalar::ZERO;
+    for b in 0u128..512 {
+      let mult = logup_multiplicities_3[b as usize] as u128;
+      let denom_val = self.logup_challenge_3 + E::Scalar::from_u128(b);
+      rhs_logup_running_sum_3 = rhs_logup_running_sum_3
+        + denom_val.invert().unwrap_or(E::Scalar::ZERO) * E::Scalar::from_u128(mult);
+
+      let mult_var = AllocatedNum::alloc(
+        cs.namespace(|| format!("RHS JND map difference check LogUp multiplicity {b}")),
+        || Ok(E::Scalar::from_u128(mult)),
+      )?;
+
+      let partial_sum_var = AllocatedNum::alloc(
+        cs.namespace(|| format!("RHS JND map difference check LogUp partial sum {b}")),
+        || Ok(rhs_logup_running_sum_3),
+      )?;
+
+      if let Some(prev) = &rhs_logup_prev_3 {
+        cs.enforce(
+          || format!("RHS JND map difference check LogUp partial sum constraint {b}"),
+          |lc| lc + partial_sum_var.get_variable() - prev.get_variable(),
+          |lc| lc + allocated_logup_challenge_3.get_variable() + (E::Scalar::from_u128(b), CS::one()),
+          |lc| lc + mult_var.get_variable(),
+        );
+      } else {
+        cs.enforce(
+          || format!("RHS JND map difference check LogUp partial sum constraint {b}"),
+          |lc| lc + partial_sum_var.get_variable(),
+          |lc| lc + allocated_logup_challenge_3.get_variable() + (E::Scalar::from_u128(b), CS::one()),
+          |lc| lc + mult_var.get_variable(),
+        );
+      }
+
+      rhs_logup_prev_3 = Some(partial_sum_var);
+    }
+    let rhs_logup_sum_3 = rhs_logup_prev_3.unwrap();
+
+    cs.enforce(
+      || "JND map difference check LogUp validity check",
+      |lc| lc + CS::one(),
+      |lc| lc + lhs_logup_sum_3.get_variable(),
+      |lc| lc + rhs_logup_sum_3.get_variable(),
+    );
 
     Ok(())
   }
