@@ -7,7 +7,9 @@ I have a "long" and "short" version of each command.
 2a. Decompose the input video in various ways. `python3 scripts/setup_videos.py video_data/videos/10stestvideo.mp4 grayscale` (when the edit is `grayscale`).
 2b. `python3 scripts/setup_videos.py video_data/videos/longtestvideo.mp4 grayscale`            
 
-# Neutron Nova video editing
+# Neutron Nova video editing, example circuit
+
+Note: the example circuit is a circuit with similar constraints to a Freivald's convolution based editing circuit, but it doesn't do anything and the circuits are kind of simulated.
 
 All in one command: `RUST_LOG=neutron_nova_video_editing=info,spartan2::neutronnova_zk=info RUSTFLAGS="-C target-cpu=native" cargo run --example neutron_nova_video_editing --release`
 
