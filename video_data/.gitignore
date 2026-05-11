@@ -1,0 +1,6 @@
+# Ignore everything under video_data
+*
+# Except this file and .gitkeep placeholders in subdirectories
+!.gitignore
+!*/
+!*/.gitkeep

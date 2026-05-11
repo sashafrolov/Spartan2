@@ -677,6 +677,39 @@ impl<E: Engine> SpartanCircuit<E> for ExampleVideoEditCircuit<E::Scalar> {
       jnd_map_variables.push(row_vars);
     }
 
+    let jnd_differences: Vec<Vec<i16>> = self.edited_image
+      .iter()
+      .zip(self.target_image.iter())
+      .zip(self.jnd_map.iter())
+      .map(|((edited_row, target_row), jnd_row)| {
+        edited_row
+          .iter()
+          .zip(target_row.iter())
+          .zip(jnd_row.iter())
+          .map(|((&e, &t), &jnd)| e as i16 - t as i16 + 2 * jnd as i16)
+          .collect()
+      })
+      .collect();
+
+    let jnd_differences_lc: Vec<Vec<LinearCombination<E::Scalar>>> = allocated_edited_image
+      .iter()
+      .zip(allocated_target_image.iter())
+      .zip(jnd_map_variables.iter())
+      .map(|((edited_row, target_row), jnd_row)| {
+        edited_row
+          .iter()
+          .zip(target_row.iter())
+          .zip(jnd_row.iter())
+          .map(|((e, t), jnd)| {
+            LinearCombination::zero()
+              + e.get_variable()
+              - t.get_variable()
+              + (E::Scalar::from(2u64), jnd.get_variable())
+          })
+          .collect()
+      })
+      .collect();
+
     
 
 
