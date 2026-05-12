@@ -10,7 +10,7 @@ mod grayscale_circuit;
 mod dummy_circuit;
 
 use dummy_circuit::DummyCircuit;
-use grayscale_circuit::{GrayscaleCircuit, generate_random_image};
+use grayscale_circuit::GrayscaleCircuit;
 use spartan2::{
   neutronnova_zk_streaming::NeutronNovaZkSNARK,
   provider::T256HyraxEngine,
@@ -18,6 +18,7 @@ use spartan2::{
 };
 use rayon::prelude::*;
 use std::time::Instant;
+use std::env;
 use tracing::{info, info_span};
 
 const NUM_CIRCUITS: usize = 4;
@@ -31,6 +32,9 @@ fn main() {
     .try_init();
 
   type E = T256HyraxEngine;
+
+  let frame_path_format = env::var("FRAME_PATH_FORMAT")
+    .unwrap_or_else(|_| "video_data/decomposed_frames/frame_{}.png".to_string());
 
   let root_span = info_span!(
     "bench",
@@ -48,7 +52,7 @@ fn main() {
 
   // Use a dummy circuit of the right shape to derive the R1CS constraints and keys.
   let shape_circuit =
-    GrayscaleCircuit::<<E as Engine>::Scalar>::new(generate_random_image(IMAGE_DIMS, 0), 0);
+    GrayscaleCircuit::<<E as Engine>::Scalar>::new(&frame_path_format, 1);
 
   let t0 = Instant::now();
   let (pk, vk) =
@@ -61,7 +65,7 @@ fn main() {
   let t0 = Instant::now();
   let step_circuits: Vec<GrayscaleCircuit<<E as Engine>::Scalar>> = (0..NUM_CIRCUITS)
     .into_par_iter()
-    .map(|i| GrayscaleCircuit::<<E as Engine>::Scalar>::new(generate_random_image(IMAGE_DIMS, i as u64), i as u64))
+    .map(|i| GrayscaleCircuit::<<E as Engine>::Scalar>::new(&frame_path_format, (i + 1) as u64))
     .collect();
   info!(elapsed_ms = t0.elapsed().as_millis(), "generate_witness");
 

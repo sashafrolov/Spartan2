@@ -1742,14 +1742,18 @@ where
     let comm_eval_W_step = self.U_verifier.comm_w_per_round[eval_w_step_commit_round].clone();
     let comm_eval_W_core = self.U_verifier.comm_w_per_round[eval_w_step_commit_round + 1].clone();
 
-    let comm = <E::PCS as FoldingEngineTrait<E>>::fold_commitments(
-      &[folded_U.comm_W, core_instance_regular.comm_W],
-      &[E::Scalar::ONE, c_eval],
-    )?;
-    let comm_eval = <E::PCS as FoldingEngineTrait<E>>::fold_commitments(
-      &[comm_eval_W_step, comm_eval_W_core],
-      &[E::Scalar::ONE, c_eval],
-    )?;
+    let (comm_result, comm_eval_result) = rayon::join(
+      || <E::PCS as FoldingEngineTrait<E>>::fold_commitments(
+        &[folded_U.comm_W, core_instance_regular.comm_W],
+        &[E::Scalar::ONE, c_eval],
+      ),
+      || <E::PCS as FoldingEngineTrait<E>>::fold_commitments(
+        &[comm_eval_W_step, comm_eval_W_core],
+        &[E::Scalar::ONE, c_eval],
+      ),
+    );
+    let comm = comm_result?;
+    let comm_eval = comm_eval_result?;
     info!(elapsed_ms = %fold_commitments_t.elapsed().as_millis(), "fold_commitments");
 
     let (_pcs_verify_span, pcs_verify_t) = start_span!("pcs_verify");
