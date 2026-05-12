@@ -62,10 +62,14 @@ fn main() {
   info!(elapsed_ms = setup_ms, "setup");
 
   // Build the step circuits — each represents one video frame.
+  let frame_offset: u64 = env::var("SNARK_EDITING_FRAME_OFFSET")
+    .ok()
+    .and_then(|v| v.parse().ok())
+    .unwrap_or(0);
   let t0 = Instant::now();
   let step_circuits: Vec<GrayscaleCircuit<<E as Engine>::Scalar>> = (0..NUM_CIRCUITS)
     .into_par_iter()
-    .map(|i| GrayscaleCircuit::<<E as Engine>::Scalar>::new(&frame_path_format, (i + 1) as u64))
+    .map(|i| GrayscaleCircuit::<<E as Engine>::Scalar>::new(&frame_path_format, (i + 1) as u64 + frame_offset))
     .collect();
   info!(elapsed_ms = t0.elapsed().as_millis(), "generate_witness");
 

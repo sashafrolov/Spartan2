@@ -388,14 +388,19 @@ where
     );
 
     let mut Us = Us;
+    // Parallelize this padding, this is expensive when doing a lot of padding.
     if Us.len() < n_padded {
-      Us.extend(vec![Us[0].clone(); n_padded - n]);
-      Ws_r_W.extend(vec![Ws_r_W[0].clone(); n_padded - n]);
-      for _ in n..n_padded {
-        Zs.push(Zs[0].deep_copy());
-      }
+      let pad = n_padded - n;
       let first_hash = instance_hashes[0];
-      instance_hashes.extend(std::iter::repeat(first_hash).take(n_padded - n));
+      let (new_zs, ()) = rayon::join(
+        || (0..pad).into_par_iter().map(|_| Zs[0].deep_copy()).collect::<Vec<_>>(),
+        || {
+          Us.extend(vec![Us[0].clone(); pad]);
+          Ws_r_W.extend(vec![Ws_r_W[0].clone(); pad]);
+          instance_hashes.extend(std::iter::repeat(first_hash).take(pad));
+        },
+      );
+      Zs.extend(new_zs);
     }
     let (_absorb_span, absorb_t) = start_span!("transcript_operations");
     for h in instance_hashes.iter() {
@@ -1739,16 +1744,14 @@ where
 
     let (_fold_commitments_span, fold_commitments_t) = start_span!("fold_commitments");
     let eval_w_step_commit_round = num_rounds_b + 1 + num_rounds_x + 1 + num_rounds_y + 1;
-    let comm_eval_W_step = self.U_verifier.comm_w_per_round[eval_w_step_commit_round].clone();
-    let comm_eval_W_core = self.U_verifier.comm_w_per_round[eval_w_step_commit_round + 1].clone();
-
     let (comm_result, comm_eval_result) = rayon::join(
       || <E::PCS as FoldingEngineTrait<E>>::fold_commitments(
         &[folded_U.comm_W, core_instance_regular.comm_W],
         &[E::Scalar::ONE, c_eval],
       ),
       || <E::PCS as FoldingEngineTrait<E>>::fold_commitments(
-        &[comm_eval_W_step, comm_eval_W_core],
+        &[self.U_verifier.comm_w_per_round[eval_w_step_commit_round].clone(),
+          self.U_verifier.comm_w_per_round[eval_w_step_commit_round + 1].clone()],
         &[E::Scalar::ONE, c_eval],
       ),
     );

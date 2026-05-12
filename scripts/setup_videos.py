@@ -143,8 +143,8 @@ def main():
         decompose_frames_to_channels(edited_frames, EDITED_CHANNELS_DIR)
 
     # Step 6: compute JND maps for each edited frame
-    print("\nStep 6: computing JND maps for edited frames...")
-    compute_and_save_jnd_maps(edited_frames, JND_MAPS_DIR)
+    # print("\nStep 6: computing JND maps for edited frames...")
+    # compute_and_save_jnd_maps(edited_frames, JND_MAPS_DIR)
 
     print("\nDone.")
 
