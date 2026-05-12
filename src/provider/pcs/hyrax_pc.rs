@@ -778,13 +778,15 @@ where
 
     // Batch-convert all projective points to affine (1 inversion via Montgomery's trick)
     let all_projective: Vec<E::GE> = (0..n)
-      .flat_map(|row| comms.iter().map(move |c| c.comm[row]))
+      .into_par_iter()
+      .flat_map_iter(|row| comms.iter().map(move |c| c.comm[row]))
       .collect();
     let all_affine = E::GE::batch_affine(&all_projective);
 
     // Use shared-weight MSM: all rows share the same scalar weights,
     // so scalar decomposition is done once instead of n times.
     let bases_rows: Vec<&[<E::GE as DlogGroup>::AffineGroupElement]> = (0..n)
+      .into_par_iter()
       .map(|row| &all_affine[row * num_comms..(row + 1) * num_comms])
       .collect();
     let folded_comm = E::GE::vartime_multiscalar_mul_shared_weights(weights, &bases_rows)?;

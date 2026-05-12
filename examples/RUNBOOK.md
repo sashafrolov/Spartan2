@@ -33,3 +33,18 @@ To get RAM usage: `RUST_LOG=neutron_nova_streaming_video_editing=info,spartan2::
 All in one command: `RUST_LOG=neutron_nova_video_editing=info,spartan2::neutronnova_zk=info RUSTFLAGS="-C target-cpu=native" cargo run --example neutron_nova_sha256_example --release`
 
 
+# Grayscaling
+
+Grayscaling is a particularly simple/cheap edit. 
+
+## Zaratan flow for non-streaming: 
+Build: `RUSTFLAGS="-C target-cpu=native" cargo build --example neutron_nova_grayscaling --release -j 96`
+Reserve machine: `srun --partition=standard --nodes=1 --ntasks=1 --cpus-per-task=64 --mem=256G --time=2:00:00 --pty bash`
+Run: `RUST_LOG=neutron_nova_grayscaling=info,spartan2::neutronnova_zk_ram_optimized=info RUSTFLAGS="-C target-cpu=native" cargo run --example neutron_nova_grayscaling --release`
+To get RAM usage: `RUST_LOG=neutron_nova_grayscaling=info,spartan2::neutronnova_zk_ram_optimized=info RUSTFLAGS="-C target-cpu=native" /usr/bin/time -v cargo run --example neutron_nova_grayscaling --release`
+
+## Zaratan flow for streaming: 
+Build: `RUSTFLAGS="-C target-cpu=native" cargo build --example neutron_nova_streaming_grayscaling --release -j 96`
+Reserve machine: `srun --partition=standard --nodes=1 --ntasks=1 --cpus-per-task=64 --mem=256G --time=2:00:00 --pty bash`
+Run: `RUST_LOG=neutron_nova_streaming_grayscaling=info,spartan2::neutronnova_zk_streaming=info RUSTFLAGS="-C target-cpu=native" cargo run --example neutron_nova_streaming_grayscaling --release`
+To get RAM usage: `RUST_LOG=neutron_nova_streaming_grayscaling=info,spartan2::neutronnova_zk_streaming=info RUSTFLAGS="-C target-cpu=native" /usr/bin/time -v cargo run --example neutron_nova_streaming_grayscaling --release`

@@ -1737,6 +1737,7 @@ where
     // verify PCS eval
     let c_eval = transcript.squeeze(b"c_eval")?;
 
+    let (_fold_commitments_span, fold_commitments_t) = start_span!("fold_commitments");
     let eval_w_step_commit_round = num_rounds_b + 1 + num_rounds_x + 1 + num_rounds_y + 1;
     let comm_eval_W_step = self.U_verifier.comm_w_per_round[eval_w_step_commit_round].clone();
     let comm_eval_W_core = self.U_verifier.comm_w_per_round[eval_w_step_commit_round + 1].clone();
@@ -1749,6 +1750,7 @@ where
       &[comm_eval_W_step, comm_eval_W_core],
       &[E::Scalar::ONE, c_eval],
     )?;
+    info!(elapsed_ms = %fold_commitments_t.elapsed().as_millis(), "fold_commitments");
 
     let (_pcs_verify_span, pcs_verify_t) = start_span!("pcs_verify");
     E::PCS::verify(
