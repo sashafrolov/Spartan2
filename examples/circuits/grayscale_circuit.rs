@@ -1,5 +1,9 @@
 #![allow(non_snake_case)]
 
+#[path = "utils.rs"]
+mod utils;
+use utils::read_color_png;
+
 use bellpepper_core::{ConstraintSystem, LinearCombination, SynthesisError, num::AllocatedNum};
 use ff::{Field, PrimeField, PrimeFieldBits};
 use rand::{Rng, RngCore, SeedableRng, rngs::StdRng};
@@ -40,7 +44,9 @@ pub struct GrayscaleCircuit<Scalar: PrimeField> {
 }
 
 impl<Scalar: PrimeField + PrimeFieldBits> GrayscaleCircuit<Scalar> {
-  pub fn new(image: Vec<Vec<(u8, u8, u8)>>, index: u64) -> Self {
+  pub fn new(path_format: &str, index: u64) -> Self {
+    let image = read_color_png(&path_format.replace("{}", &format!("{:04}", index)));
+
     let height = image.len();
     assert!(height > 0);
     let width = image[0].len();
