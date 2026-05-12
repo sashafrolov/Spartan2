@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VIDEO_DATA="$(dirname "$0")/video_data"
+VIDEO_DATA="$(dirname "$0")/../video_data"
 
 for dir in \
     decomposed_frames \
