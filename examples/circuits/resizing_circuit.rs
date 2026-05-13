@@ -57,6 +57,7 @@ impl<Scalar: PrimeField + PrimeFieldBits> ResizingCircuit<Scalar> {
         .replace("{}", &format!("{:04}", index)),
     );
 
+    // For now, just do a 2x resize on both dimensions.
     let height = image.len();
     assert!(height > 0);
     let width = image[0].len();
@@ -70,8 +71,7 @@ impl<Scalar: PrimeField + PrimeFieldBits> ResizingCircuit<Scalar> {
       "B" => 2u64,
       _ => panic!("channel_letter must be \"R\", \"G\", or \"B\", got {:?}", channel_letter),
     };
-    let base = (1u64 << 32) + 12 * index + 4 * channel_offset;
-    // r and s are sized to the output dimensions (half of input).
+    let base = (1u64 << 32) + 18 * index + 6 * channel_offset;
     let r = generate_random_vector(height / 2, base);
     let s = generate_random_vector(width / 2, base + 1);
     let logup_challenge_1 = generate_random_vector(1, base + 2).remove(0);
@@ -98,7 +98,7 @@ impl<Scalar: PrimeField + PrimeFieldBits> ResizingCircuit<Scalar> {
         acc * input_polynomial_interpolation_challenge + s
       });
 
-    // Compute 2x downscale via sparse matrix multiplication.
+    // Compute 2x resized image (implemented with sparse matrix mul. for Freivald's reasons)
     let image_u64: Vec<Vec<u64>> = image.iter()
       .map(|row| row.iter().map(|&v| v as u64).collect())
       .collect();
@@ -107,7 +107,7 @@ impl<Scalar: PrimeField + PrimeFieldBits> ResizingCircuit<Scalar> {
     let row_wise = sparse_dense_matmul_u64(&resize_v_sparse, &image_u64);
     let convolution_result = dense_sparse_matmul_u64(&row_wise, &resize_h_sparse, width / 2);
 
-    // FILTER_BITS = 16; two multiplications scale by (1<<16)^2 = 1<<32.
+    // Both sides of the multiplication are in fixed point and add a 2^16 scaling factor, remove it.
     let edited_image: Vec<Vec<u8>> = convolution_result.iter()
       .map(|row| row.iter().map(|&v| (v >> 32) as u8).collect())
       .collect();
@@ -132,8 +132,7 @@ impl<Scalar: PrimeField + PrimeFieldBits> ResizingCircuit<Scalar> {
       });
     let target_image = edited_image.clone();
 
-    // resize_v_f is (height/2) × height; rTA = r^T * resize_v_f has length height.
-    // resize_h_f is width × (width/2);   As  = resize_h_f * s        has length width.
+    // Build resizing matrices for downscaling by 2x in both dimensions.
     let resize_v_f: Vec<Vec<Scalar>> = create_resizing_matrix(height, height / 2, false);
     let resize_h_f: Vec<Vec<Scalar>> = create_resizing_matrix(width, width / 2, true);
     let rTA = vector_matrix_product(&r, &resize_v_f);
@@ -254,7 +253,7 @@ impl<E: Engine> SpartanCircuit<E> for ResizingCircuit<E::Scalar> {
       allocated_target_image.push(row_vars);
     }
 
-    // convolution_result is (height/2) × (width/2): the u64 intermediate before right-shifting.
+    // convolution_result is (height/2) x (width/2). Intermediate values before right shifting.
     let mut allocated_convolution_result = Vec::new();
     for (i, row) in self.convolution_result.clone().into_iter().enumerate() {
       let mut row_vars = Vec::new();
@@ -268,14 +267,12 @@ impl<E: Engine> SpartanCircuit<E> for ResizingCircuit<E::Scalar> {
       allocated_convolution_result.push(row_vars);
     }
 
-    // r has length height/2; rTA has length height (covers input rows).
     let mut allocated_r = Vec::new();
     for (i, val) in self.r.clone().into_iter().enumerate() {
       let n = AllocatedNum::alloc_input(cs.namespace(|| format!("r entry {i}")), || Ok(val))?;
       allocated_r.push(n);
     }
 
-    // s has length width/2; As has length width (covers input cols).
     let mut allocated_s = Vec::new();
     for (i, val) in self.s.clone().into_iter().enumerate() {
       let n = AllocatedNum::alloc_input(cs.namespace(|| format!("s entry {i}")), || Ok(val))?;
@@ -295,7 +292,6 @@ impl<E: Engine> SpartanCircuit<E> for ResizingCircuit<E::Scalar> {
     }
 
     // 3. Compute LHS of Freivalds: (r^T A_v) I (A_h s).
-    //    IAs[i] = sum_j image[i][j] * As[j]  (As has length width, one entry per input column).
     let mut IAs = Vec::new();
     let mut IAs_felts = Vec::new();
     for (i, row) in image_input_vars.iter().enumerate() {
@@ -333,7 +329,6 @@ impl<E: Engine> SpartanCircuit<E> for ResizingCircuit<E::Scalar> {
       IAs.push(row_partial_sums.pop().unwrap());
     }
 
-    // rTAIAs = (r^T A_v) · IAs  (rTA has length height, one entry per input row).
     let mut lhs_partial_sums: Vec<AllocatedNum<E::Scalar>> = Vec::new();
     let mut lhs_running_sum = E::Scalar::ZERO;
     for (i, (x, y)) in IAs.iter().zip(allocated_rTA.iter()).enumerate() {
@@ -362,7 +357,6 @@ impl<E: Engine> SpartanCircuit<E> for ResizingCircuit<E::Scalar> {
     let rTAIAs = lhs_partial_sums.pop().unwrap();
 
     // 4. Compute RHS of Freivalds: r^T F s.
-    //    Fs[i] = sum_j convolution_result[i][j] * s[j]  (s has length width/2).
     let mut Fs = Vec::new();
     let mut Fs_felts = Vec::new();
     for (i, row) in allocated_convolution_result.iter().enumerate() {
@@ -401,7 +395,6 @@ impl<E: Engine> SpartanCircuit<E> for ResizingCircuit<E::Scalar> {
       Fs.push(row_partial_sums.pop().unwrap());
     }
 
-    // rTFs = r^T · Fs  (r has length height/2).
     let mut rhs_partial_sums: Vec<AllocatedNum<E::Scalar>> = Vec::new();
     let mut rhs_running_sum = E::Scalar::ZERO;
     for (i, (x, y)) in Fs.iter().zip(allocated_r.iter()).enumerate() {

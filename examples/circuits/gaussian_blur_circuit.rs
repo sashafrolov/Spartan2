@@ -71,7 +71,7 @@ impl<Scalar: PrimeField + PrimeFieldBits> GaussianBlurCircuit<Scalar> {
       "B" => 2u64,
       _ => panic!("channel_letter must be \"R\", \"G\", or \"B\", got {:?}", channel_letter),
     };
-    let base = (1u64 << 32) + 12 * index + 4 * channel_offset;
+    let base = (1u64 << 32) + 18 * index + 6 * channel_offset;
     let r = generate_random_vector(height, base);
     let s = generate_random_vector(width, base + 1);
     let logup_challenge_1 = generate_random_vector(1, base + 2).remove(0);
