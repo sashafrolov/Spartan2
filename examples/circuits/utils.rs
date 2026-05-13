@@ -7,7 +7,7 @@ use rayon::prelude::*;
 
 pub static SIGMA: f64 = 10.0;
 pub static GBLUR_RADIUS: usize = 30;
-static KERNEL_SCALE: u64 = 1u64 << 24;
+static KERNEL_SCALE: u64 = 1u64 << 16;
 static FILTER_BITS: usize = 16;
 
 #[derive(Debug, Clone, Copy)]
@@ -202,6 +202,7 @@ pub fn create_resizing_matrix<F: PrimeField>(src_size: usize, dst_size: usize, f
   }
 }
 
+// Might be broken for non integer resize ratios, haven't fully debugged this.
 fn create_resize_matrix_impl<F: PrimeField>(src_size: usize, dst_size: usize) -> Vec<Vec<F>> {
   let filter_size = 4;
   let mut matrix = vec![vec![F::ZERO; src_size]; dst_size];
@@ -269,20 +270,8 @@ pub fn create_gblur_matrix<F: PrimeField>(size: usize, sigma: f64, radius: usize
 
   for i in 0..size {
     let left_overflow = if i < radius { radius - i } else { 0 };
-    let right_overflow = if i + radius >= size { i + radius - size + 1 } else { 0 };
-
-    let left_mass: F = (0..left_overflow).fold(F::ZERO, |acc, j| acc + kernel[j]);
-    let right_mass: F = (kernel_len - right_overflow..kernel_len).fold(F::ZERO, |acc, j| acc + kernel[j]);
-
     for (k_idx, j) in (i.saturating_sub(radius)..=(i + radius).min(size - 1)).enumerate() {
       matrix[i][j] = kernel[left_overflow + k_idx];
-    }
-
-    if left_overflow > 0 {
-      matrix[i][0] = matrix[i][0] + left_mass;
-    }
-    if right_overflow > 0 {
-      matrix[i][size - 1] = matrix[i][size - 1] + right_mass;
     }
   }
 
@@ -316,20 +305,8 @@ pub fn create_gblur_matrix_u64(size: usize, sigma: f64, radius: usize) -> Vec<Ve
 
   for i in 0..size {
     let left_overflow = if i < radius { radius - i } else { 0 };
-    let right_overflow = if i + radius >= size { i + radius - size + 1 } else { 0 };
-
-    let left_mass: u64 = (0..left_overflow).map(|j| kernel[j]).sum();
-    let right_mass: u64 = (kernel_len - right_overflow..kernel_len).map(|j| kernel[j]).sum();
-
     for (k_idx, j) in (i.saturating_sub(radius)..=(i + radius).min(size - 1)).enumerate() {
       matrix[i][j] = kernel[left_overflow + k_idx];
-    }
-
-    if left_overflow > 0 {
-      matrix[i][0] = matrix[i][0].wrapping_add(left_mass);
-    }
-    if right_overflow > 0 {
-      matrix[i][size - 1] = matrix[i][size - 1].wrapping_add(right_mass);
     }
   }
 
@@ -506,6 +483,73 @@ pub fn create_matrix_u64(matrix_type: MatrixType, size: usize, need_transpose: b
   }
 }
 
+// Simple Sparse matrix representation. This is useful for the resizing matrix
+// where it doesn't have the banded structure, but still want to take advantage of the size.
+// Each entry is (column_index, value). Rows with no non-zeros are empty vecs.
+pub type SparseMatrix = Vec<Vec<(usize, u64)>>;
+
+// Builds the sparse resizing matrix directly without materialising the dense form.
+// for_horizontal=false → dst_size × src_size (left-multiply)
+// for_horizontal=true  → src_size × dst_size (transposed, right-multiply)
+pub fn create_resizing_sparse(src_size: usize, dst_size: usize, for_horizontal: bool) -> SparseMatrix {
+  assert!(src_size > 0 && dst_size > 0);
+  let n_rows = if for_horizontal { src_size } else { dst_size };
+  let mut rows: SparseMatrix = vec![Vec::new(); n_rows];
+  let x_inc = ((src_size << 16) / dst_size + 1) >> 1;
+  for i in 0..dst_size {
+    let src_pos = (i * x_inc) >> 15;
+    let xx_inc  = x_inc & 0xffff;
+    let xx      = (xx_inc * (1 << FILTER_BITS)) / x_inc;
+    for j in 0..4usize {
+      let coeff: u64 = if j == 0 { (1u64 << FILTER_BITS) - xx as u64 } else { xx as u64 };
+      if coeff == 0 { continue; }
+      let src_idx = src_pos + j;
+      if src_idx < src_size {
+        if for_horizontal {
+          rows[src_idx].push((i, coeff));  // transposed: row=src_idx, col=i
+        } else {
+          rows[i].push((src_idx, coeff));
+        }
+      }
+    }
+  }
+  rows
+}
+
+// Sparse A × dense B → dense result. A has `rows.len()` rows; B rows are indexed by col of A.
+pub fn sparse_dense_matmul_u64(a: &SparseMatrix, b: &[Vec<u64>]) -> Vec<Vec<u64>> {
+  assert!(!b.is_empty());
+  let b_cols = b[0].len();
+  a.iter()
+    .map(|a_row| {
+      let mut out = vec![0u64; b_cols];
+      for &(k, v) in a_row {
+        for j in 0..b_cols {
+          out[j] = out[j].wrapping_add(v.wrapping_mul(b[k][j]));
+        }
+      }
+      out
+    })
+    .collect()
+}
+
+// Dense A × sparse B → dense result. B_cols is the number of columns in B.
+pub fn dense_sparse_matmul_u64(a: &[Vec<u64>], b: &SparseMatrix, b_cols: usize) -> Vec<Vec<u64>> {
+  a.iter()
+    .map(|a_row| {
+      let mut out = vec![0u64; b_cols];
+      for (k, b_row) in b.iter().enumerate() {
+        let a_val = a_row[k];
+        if a_val == 0 { continue; }
+        for &(j, v) in b_row {
+          out[j] = out[j].wrapping_add(a_val.wrapping_mul(v));
+        }
+      }
+      out
+    })
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -541,25 +585,28 @@ mod tests {
   #[test]
   #[ignore]
   fn perf_gblur_full_flow_u64() {
+    // Test consistency between the "fast u64" flow and the slow field element-based flow.
+    // These report a perf improvement of ~3x, but this is a bit misleading. The F code is parallelized
+    // but the u64 code isn't.
     let mut rng = rand::thread_rng();
 
-    // Shared inputs — not included in either timing window
     let image_u64: Vec<Vec<u64>> = (0..IMAGE_HEIGHT)
       .map(|_| (0..IMAGE_WIDTH).map(|_| rng.next_u32() as u8 as u64).collect())
       .collect();
     let r: Vec<F> = (0..IMAGE_HEIGHT).map(|_| gen_rand_scalar::<F>()).collect();
     let s: Vec<F> = (0..IMAGE_WIDTH).map(|_| gen_rand_scalar::<F>()).collect();
 
-    // --- u64-accelerated workflow ---
+    // --- u64 workflow ---
     let t0 = Instant::now();
 
-    // Image products in u64
+    let t_sub = Instant::now();
     let gblur_v_u64 = create_gblur_matrix_u64(IMAGE_HEIGHT, SIGMA, GBLUR_RADIUS);
     let gblur_h_u64 = create_gblur_matrix_u64(IMAGE_WIDTH,  SIGMA, GBLUR_RADIUS);
     let row_wise_u64 = matrix_matrix_product_band_left_u64(&gblur_v_u64, &image_u64, GBLUR_RADIUS);
     let edited_u64   = matrix_matrix_product_band_right_u64(&row_wise_u64, &gblur_h_u64, GBLUR_RADIUS);
+    let elapsed_u64_matmul = t_sub.elapsed();
 
-    // Convert to F for Freivalds
+    // Convert to field for Freivalds
     let image_f: Vec<Vec<F>> = image_u64.iter()
       .map(|row| row.iter().map(|&v| F::from(v)).collect())
       .collect();
@@ -567,7 +614,8 @@ mod tests {
       .map(|row| row.iter().map(|&v| F::from(v)).collect())
       .collect();
 
-    // Freivalds in F
+    // Freivalds in field
+    let t_sub = Instant::now();
     let gblur_v_f: Vec<Vec<F>> = create_gblur_matrix(IMAGE_HEIGHT, SIGMA, GBLUR_RADIUS);
     let gblur_h_f: Vec<Vec<F>> = create_gblur_matrix(IMAGE_WIDTH,  SIGMA, GBLUR_RADIUS);
     let rTA         = vector_matrix_product(&r, &gblur_v_f);
@@ -576,12 +624,14 @@ mod tests {
     let rTAIAs      = inner_product(&rTAI, &As);
     let rTF         = vector_matrix_product(&r, &edited_f);
     let rTFs        = inner_product(&rTF, &s);
+    let elapsed_u64_freivalds = t_sub.elapsed();
 
     let elapsed_u64 = t0.elapsed();
 
     // --- Pure F workflow ---
     let t0 = Instant::now();
 
+    let t_sub = Instant::now();
     let gblur_v_f2: Vec<Vec<F>> = create_gblur_matrix(IMAGE_HEIGHT, SIGMA, GBLUR_RADIUS);
     let gblur_h_f2: Vec<Vec<F>> = create_gblur_matrix(IMAGE_WIDTH,  SIGMA, GBLUR_RADIUS);
     let image_f2: Vec<Vec<F>> = image_u64.iter()
@@ -589,17 +639,21 @@ mod tests {
       .collect();
     let row_wise_f2  = matrix_matrix_product_band_left(&gblur_v_f2, &image_f2, GBLUR_RADIUS);
     let edited_f2    = matrix_matrix_product_band_right(&row_wise_f2, &gblur_h_f2, GBLUR_RADIUS);
+    let elapsed_f_matmul = t_sub.elapsed();
+
+    let t_sub = Instant::now();
     let rTA_f        = vector_matrix_product(&r, &gblur_v_f2);
     let As_f         = matrix_vector_product(&gblur_h_f2, &s);
     let rTAI_f       = vector_matrix_product(&rTA_f, &image_f2);
     let rTAIAs_f     = inner_product(&rTAI_f, &As_f);
     let rTF_f        = vector_matrix_product(&r, &edited_f2);
     let rTFs_f       = inner_product(&rTF_f, &s);
+    let elapsed_f_freivalds = t_sub.elapsed();
 
     let elapsed_f = t0.elapsed();
 
-    println!("u64-accelerated: {elapsed_u64:?}  |  LHS={rTAIAs:?}  RHS={rTFs:?}");
-    println!("pure F:          {elapsed_f:?}  |  LHS={rTAIAs_f:?}  RHS={rTFs_f:?}");
+    println!("u64-accelerated: {elapsed_u64:?}  (matmul={elapsed_u64_matmul:?}  freivalds={elapsed_u64_freivalds:?})  |  LHS={rTAIAs:?}  RHS={rTFs:?}");
+    println!("pure F:          {elapsed_f:?}  (matmul={elapsed_f_matmul:?}  freivalds={elapsed_f_freivalds:?})  |  LHS={rTAIAs_f:?}  RHS={rTFs_f:?}");
 
     // Consistency checks
     for i in 0..IMAGE_HEIGHT {
@@ -610,4 +664,128 @@ mod tests {
     assert_eq!(rTAIAs, rTAIAs_f, "Freivalds LHS mismatch");
     assert_eq!(rTFs,   rTFs_f,   "Freivalds RHS mismatch");
   }
+
+  #[test]
+  #[ignore]
+  fn perf_resize_full_flow_u64() {
+    const OUT_HEIGHT: usize = IMAGE_HEIGHT / 2;
+    const OUT_WIDTH:  usize = IMAGE_WIDTH  / 2;
+
+    let mut rng = rand::thread_rng();
+
+    // Shared inputs — not included in either timing window.
+    // r/s are sized to the *output* dimensions because the Freivalds identity is
+    // r^T * V * image * H * s = r^T * edited * s, where V is OUT_HEIGHT×IMAGE_HEIGHT
+    // and H is IMAGE_WIDTH×OUT_WIDTH.
+    let image_u64: Vec<Vec<u64>> = (0..IMAGE_HEIGHT)
+      .map(|_| (0..IMAGE_WIDTH).map(|_| rng.next_u32() as u8 as u64).collect())
+      .collect();
+    let r: Vec<F> = (0..OUT_HEIGHT).map(|_| gen_rand_scalar::<F>()).collect();
+    let s: Vec<F> = (0..OUT_WIDTH ).map(|_| gen_rand_scalar::<F>()).collect();
+
+    // --- u64-accelerated workflow ---
+    let t0 = Instant::now();
+
+    let t_sub = Instant::now();
+    // resize_v: OUT_HEIGHT × IMAGE_HEIGHT  (left-multiplies image rows)
+    // resize_h: IMAGE_WIDTH × OUT_WIDTH    (right-multiplies image cols)
+    let resize_v_u64 = create_resizing_matrix_u64(IMAGE_HEIGHT, OUT_HEIGHT, false);
+    let resize_h_u64 = create_resizing_matrix_u64(IMAGE_WIDTH,  OUT_WIDTH,  true);
+    let row_wise_u64 = matrix_matrix_product_u64(&resize_v_u64, &image_u64); // OUT_HEIGHT × IMAGE_WIDTH
+    let edited_u64   = matrix_matrix_product_u64(&row_wise_u64, &resize_h_u64); // OUT_HEIGHT × OUT_WIDTH
+    let elapsed_u64_matmul = t_sub.elapsed();
+
+    let image_f: Vec<Vec<F>> = image_u64.iter()
+      .map(|row| row.iter().map(|&v| F::from(v)).collect())
+      .collect();
+    let edited_f: Vec<Vec<F>> = edited_u64.iter()
+      .map(|row| row.iter().map(|&v| F::from(v)).collect())
+      .collect();
+
+    let t_sub = Instant::now();
+    let resize_v_f: Vec<Vec<F>> = create_resizing_matrix(IMAGE_HEIGHT, OUT_HEIGHT, false);
+    let resize_h_f: Vec<Vec<F>> = create_resizing_matrix(IMAGE_WIDTH,  OUT_WIDTH,  true);
+    let rTA    = vector_matrix_product(&r, &resize_v_f);    // length IMAGE_HEIGHT
+    let As     = matrix_vector_product(&resize_h_f, &s);    // length IMAGE_WIDTH
+    let rTAI   = vector_matrix_product(&rTA, &image_f);     // length IMAGE_WIDTH
+    let rTAIAs = inner_product(&rTAI, &As);
+    let rTF    = vector_matrix_product(&r, &edited_f);      // length OUT_WIDTH
+    let rTFs   = inner_product(&rTF, &s);
+    let elapsed_u64_freivalds = t_sub.elapsed();
+
+    let elapsed_u64 = t0.elapsed();
+
+    // --- Pure F workflow ---
+    let t0 = Instant::now();
+
+    let t_sub = Instant::now();
+    let resize_v_f2: Vec<Vec<F>> = create_resizing_matrix(IMAGE_HEIGHT, OUT_HEIGHT, false);
+    let resize_h_f2: Vec<Vec<F>> = create_resizing_matrix(IMAGE_WIDTH,  OUT_WIDTH,  true);
+    let image_f2: Vec<Vec<F>> = image_u64.iter()
+      .map(|row| row.iter().map(|&v| F::from(v)).collect())
+      .collect();
+    let row_wise_f2 = matrix_matrix_product(&resize_v_f2, &image_f2);
+    let edited_f2   = matrix_matrix_product(&row_wise_f2, &resize_h_f2);
+    let elapsed_f_matmul = t_sub.elapsed();
+
+    let t_sub = Instant::now();
+    let rTA_f    = vector_matrix_product(&r, &resize_v_f2);
+    let As_f     = matrix_vector_product(&resize_h_f2, &s);
+    let rTAI_f   = vector_matrix_product(&rTA_f, &image_f2);
+    let rTAIAs_f = inner_product(&rTAI_f, &As_f);
+    let rTF_f    = vector_matrix_product(&r, &edited_f2);
+    let rTFs_f   = inner_product(&rTF_f, &s);
+    let elapsed_f_freivalds = t_sub.elapsed();
+
+    let elapsed_f = t0.elapsed();
+
+    println!("u64-accelerated: {elapsed_u64:?}  (matmul={elapsed_u64_matmul:?}  freivalds={elapsed_u64_freivalds:?})  |  LHS={rTAIAs:?}  RHS={rTFs:?}");
+    println!("pure F:          {elapsed_f:?}  (matmul={elapsed_f_matmul:?}  freivalds={elapsed_f_freivalds:?})  |  LHS={rTAIAs_f:?}  RHS={rTFs_f:?}");
+
+    for i in 0..OUT_HEIGHT {
+      for j in 0..OUT_WIDTH {
+        assert_eq!(edited_f[i][j], edited_f2[i][j], "edited image mismatch at ({i}, {j})");
+      }
+    }
+    assert_eq!(rTAIAs, rTAIAs_f, "Freivalds LHS mismatch");
+    assert_eq!(rTFs,   rTFs_f,   "Freivalds RHS mismatch");
+  }
+
+  #[test]
+  #[ignore]
+  fn perf_resize_sparse_u64() {
+    const OUT_HEIGHT: usize = IMAGE_HEIGHT / 2;
+    const OUT_WIDTH:  usize = IMAGE_WIDTH  / 2;
+
+    let mut rng = rand::thread_rng();
+    let image_u64: Vec<Vec<u64>> = (0..IMAGE_HEIGHT)
+      .map(|_| (0..IMAGE_WIDTH).map(|_| rng.next_u32() as u8 as u64).collect())
+      .collect();
+
+    // --- Sparse u64 ---
+    let t0 = Instant::now();
+    let resize_v_sp = create_resizing_sparse(IMAGE_HEIGHT, OUT_HEIGHT, false);
+    let resize_h_sp = create_resizing_sparse(IMAGE_WIDTH,  OUT_WIDTH,  true);
+    let row_wise_sp = sparse_dense_matmul_u64(&resize_v_sp, &image_u64);
+    let edited_sp   = dense_sparse_matmul_u64(&row_wise_sp, &resize_h_sp, OUT_WIDTH);
+    let elapsed_sp  = t0.elapsed();
+
+    // --- Dense u64 (baseline) ---
+    let t0 = Instant::now();
+    let resize_v_d = create_resizing_matrix_u64(IMAGE_HEIGHT, OUT_HEIGHT, false);
+    let resize_h_d = create_resizing_matrix_u64(IMAGE_WIDTH,  OUT_WIDTH,  true);
+    let row_wise_d = matrix_matrix_product_u64(&resize_v_d, &image_u64);
+    let edited_d   = matrix_matrix_product_u64(&row_wise_d, &resize_h_d);
+    let elapsed_d  = t0.elapsed();
+
+    println!("sparse u64: {elapsed_sp:?}");
+    println!("dense  u64: {elapsed_d:?}");
+
+    for i in 0..OUT_HEIGHT {
+      for j in 0..OUT_WIDTH {
+        assert_eq!(edited_sp[i][j], edited_d[i][j], "mismatch at ({i}, {j})");
+      }
+    }
+  }
+
 }

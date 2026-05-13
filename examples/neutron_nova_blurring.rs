@@ -1,0 +1,104 @@
+// NeutronNova gaussian blurring (non-streaming). Folds proofs for each channel (R/G/B) of each frame.
+//
+// Run with:
+//   RUST_LOG=neutron_nova_blurring=info,spartan2::neutronnova_zk_ram_optimized=info RUSTFLAGS="-C target-cpu=native" cargo run --example neutron_nova_blurring --release
+
+#![allow(non_snake_case)]
+#[path = "circuits/gaussian_blur_circuit.rs"]
+mod gaussian_blur_circuit;
+#[path = "circuits/dummy_circuit.rs"]
+mod dummy_circuit;
+
+use dummy_circuit::DummyCircuit;
+use gaussian_blur_circuit::GaussianBlurCircuit;
+use spartan2::{
+  neutronnova_zk_ram_optimized::NeutronNovaZkSNARK,
+  provider::T256HyraxEngine,
+  traits::Engine,
+};
+use rayon::prelude::*;
+use std::time::Instant;
+use std::env;
+use tracing::{info, info_span};
+
+const CHANNELS: [&str; 3] = ["R", "G", "B"];
+const NUM_FRAMES: usize = 1;
+const NUM_CIRCUITS: usize = NUM_FRAMES * 3;
+const IMAGE_DIMS: (usize, usize) = (1280, 720);
+
+fn main() {
+  let _ = tracing_subscriber::fmt()
+    .with_target(false)
+    .with_ansi(true)
+    .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+    .try_init();
+
+  type E = T256HyraxEngine;
+
+  let channel_path_format = env::var("CHANNEL_PATH_FORMAT")
+    .unwrap_or_else(|_| "video_data/decomposed_frame_channels/{channel}_{}.png".to_string());
+
+  let root_span = info_span!(
+    "bench",
+    num_circuits = NUM_CIRCUITS,
+    num_frames = NUM_FRAMES,
+    image_height = IMAGE_DIMS.0,
+    image_width = IMAGE_DIMS.1,
+  )
+  .entered();
+  info!(
+    num_circuits = NUM_CIRCUITS,
+    num_frames = NUM_FRAMES,
+    image_height = IMAGE_DIMS.0,
+    image_width = IMAGE_DIMS.1,
+    "starting NeutronNova blurring benchmark"
+  );
+
+  // Use a dummy circuit of the right shape to derive the R1CS constraints and keys.
+  let shape_circuit =
+    GaussianBlurCircuit::<<E as Engine>::Scalar>::new(&channel_path_format, "R", 1);
+
+  let t0 = Instant::now();
+  let (pk, vk) =
+    NeutronNovaZkSNARK::<E>::setup(&shape_circuit, &DummyCircuit::<E>::default(), NUM_CIRCUITS)
+      .unwrap();
+  let setup_ms = t0.elapsed().as_millis();
+  info!(elapsed_ms = setup_ms, "setup");
+
+  // Build the step circuits — each represents one channel of one video frame.
+  // Ordering: (frame 1, R), (frame 1, G), (frame 1, B), (frame 2, R), ...
+  let frame_offset: u64 = env::var("SNARK_EDITING_FRAME_OFFSET")
+    .ok()
+    .and_then(|v| v.parse().ok())
+    .unwrap_or(0);
+  let t0 = Instant::now();
+  let step_circuits: Vec<GaussianBlurCircuit<<E as Engine>::Scalar>> = (0..NUM_CIRCUITS)
+    .into_par_iter()
+    .map(|i| {
+      let frame_idx = (i / 3) as u64 + 1 + frame_offset;
+      let channel = CHANNELS[i % 3];
+      GaussianBlurCircuit::<<E as Engine>::Scalar>::new(&channel_path_format, channel, frame_idx)
+    })
+    .collect();
+  
+  info!(elapsed_ms = t0.elapsed().as_millis(), "generate_witness");
+
+  let core_circuit = DummyCircuit::<E>::default();
+
+  let t0 = Instant::now();
+  let snark =
+    NeutronNovaZkSNARK::prove(&pk, &step_circuits, &core_circuit, false).unwrap();
+  info!(elapsed_ms = t0.elapsed().as_millis(), "prove");
+
+  let t0 = Instant::now();
+  let result = snark.verify(&vk, NUM_CIRCUITS).unwrap();
+  let verify_ms = t0.elapsed().as_millis();
+  let (public_values_step, _public_values_core): (Vec<_>, Vec<_>) = result;
+  info!(elapsed_ms = verify_ms, "verify");
+
+  info!(
+    num_step_circuits = public_values_step.len(),
+    "verification successful"
+  );
+  drop(root_span);
+}

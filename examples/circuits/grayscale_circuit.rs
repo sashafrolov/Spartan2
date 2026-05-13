@@ -54,12 +54,12 @@ impl<Scalar: PrimeField + PrimeFieldBits> GrayscaleCircuit<Scalar> {
 
     // The randomness generation feature in Spartan2 was kind of broken at the time of writing.
     // generating challenges like this for now, this has the same performance profile, but would need to be fixed.
-    let base = (1u64 << 32) + 4 * index;
+    let base = (1u64 << 32) + 5 * index;
+    let input_polynomial_interpolation_challenge  = generate_random_vector(1, base + 1).remove(0);
     let logup_challenge_1 = generate_random_vector(1, base + 2).remove(0);
     let logup_challenge_2 = generate_random_vector(1, base + 3).remove(0);
     let logup_challenge_3 = generate_random_vector(1, base + 4).remove(0);
-    let input_polynomial_interpolation_challenge = generate_random_vector(1, base + 1).remove(0);
-    let output_polynomial_interpolation_challenge = generate_random_vector(1, base + 2).remove(0);
+    let output_polynomial_interpolation_challenge = generate_random_vector(1, base + 5).remove(0);
 
     // Evaluate the input image polynomial interpolation.
     let flat_image_vals: Vec<(u8, u8, u8)> = image.iter().flatten().copied().collect();
