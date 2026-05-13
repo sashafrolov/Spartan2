@@ -780,13 +780,26 @@ impl<E: Engine> R1CSInstance<E> {
     let d = Us[0].X.len();
 
     // X
-    let mut X_acc = vec![E::Scalar::ZERO; d];
-    for (i, Ui) in Us.iter().enumerate() {
-      let wi = w[i];
-      for (j, Uij) in Ui.X.iter().enumerate() {
-        X_acc[j] += wi * Uij;
-      }
-    }
+    let X_acc = Us.par_iter()
+      .zip(w.par_iter())
+      .fold(
+        || vec![E::Scalar::ZERO; d],
+        |mut acc, (Ui, &wi)| {
+          for (a, Uij) in acc.iter_mut().zip(Ui.X.iter()) {
+            *a += wi * *Uij;
+          }
+          acc
+        },
+      )
+      .reduce(
+        || vec![E::Scalar::ZERO; d],
+        |mut a, b| {
+          for (ai, bi) in a.iter_mut().zip(b.iter()) {
+            *ai += *bi;
+          }
+          a
+        },
+      );
 
     // commitment (group lin. comb)
     let comm_acc = <E::PCS as FoldingEngineTrait<E>>::fold_commitments(
