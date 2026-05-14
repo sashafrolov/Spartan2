@@ -62,3 +62,17 @@ Build: `RUSTFLAGS="-C target-cpu=native" cargo build --example neutron_nova_stre
 Reserve machine: `srun --partition=standard --nodes=1 --ntasks=1 --cpus-per-task=64 --mem=256G --time=2:00:00 --pty bash`
 Run: `RUST_LOG=neutron_nova_streaming_blurring=info,spartan2::neutronnova_zk_streaming=info RUSTFLAGS="-C target-cpu=native" cargo run --example neutron_nova_streaming_blurring --release`
 To get RAM usage: `RUST_LOG=neutron_nova_streaming_blurring=info,spartan2::neutronnova_zk_streaming=info RUSTFLAGS="-C target-cpu=native" /usr/bin/time -v cargo run --example neutron_nova_streaming_blurring --release`
+
+# Resizing
+
+## Zaratan flow for non-streaming: 
+Build: `RUSTFLAGS="-C target-cpu=native" cargo build --example neutron_nova_resizing --release -j 96`
+Reserve machine: `srun --partition=standard --nodes=1 --ntasks=1 --cpus-per-task=64 --mem=256G --time=2:00:00 --pty bash`
+Run: `RUST_LOG=neutron_nova_resizing=info,spartan2::neutronnova_zk_ram_optimized=info RUSTFLAGS="-C target-cpu=native" cargo run --example neutron_nova_resizing --release`
+To get RAM usage: `RUST_LOG=neutron_nova_resizing=info,spartan2::neutronnova_zk_ram_optimized=info RUSTFLAGS="-C target-cpu=native" /usr/bin/time -v cargo run --example neutron_nova_resizing --release`
+
+## Zaratan flow for streaming: 
+Build: `RUSTFLAGS="-C target-cpu=native" cargo build --example neutron_nova_streaming_resizing --release -j 128`
+Reserve machine: `srun --partition=standard --nodes=1 --ntasks=1 --cpus-per-task=64 --mem=256G --time=2:00:00 --pty bash`
+Run: `RUST_LOG=neutron_nova_streaming_resizing=info,spartan2::neutronnova_zk_streaming=info RUSTFLAGS="-C target-cpu=native" cargo run --example neutron_nova_streaming_resizing --release`
+To get RAM usage: `RUST_LOG=neutron_nova_streaming_resizing=info,spartan2::neutronnova_zk_streaming=info RUSTFLAGS="-C target-cpu=native" /usr/bin/time -v cargo run --example neutron_nova_streaming_resizing --release`
