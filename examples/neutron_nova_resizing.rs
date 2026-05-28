@@ -12,6 +12,7 @@ mod dummy_circuit;
 use dummy_circuit::DummyCircuit;
 use resizing_circuit::ResizingCircuit;
 use spartan2::{
+  bellpepper::{r1cs::SpartanShape, shape_cs::ShapeCS},
   neutronnova_zk_ram_optimized::NeutronNovaZkSNARK,
   provider::T256HyraxEngine,
   traits::Engine,
@@ -57,6 +58,24 @@ fn main() {
   // Use a dummy circuit of the right shape to derive the R1CS constraints and keys.
   let shape_circuit =
     ResizingCircuit::<<E as Engine>::Scalar>::new(&channel_path_format, "R", 1);
+  let [num_cons_unpadded, num_shared_unpadded, num_precommitted_unpadded, num_rest_unpadded,
+       num_cons, num_shared, num_precommitted, num_rest, num_public, num_challenges] =
+    <ShapeCS<E> as SpartanShape<E>>::r1cs_shape(&shape_circuit)
+      .unwrap()
+      .sizes();
+  info!(
+    num_cons_unpadded,
+    num_shared_unpadded,
+    num_precommitted_unpadded,
+    num_rest_unpadded,
+    num_cons,
+    num_shared,
+    num_precommitted,
+    num_rest,
+    num_public,
+    num_challenges,
+    "shape_circuit"
+  );
 
   let t0 = Instant::now();
   let (pk, vk) =
@@ -95,6 +114,9 @@ fn main() {
   let verify_ms = t0.elapsed().as_millis();
   let (public_values_step, _public_values_core): (Vec<_>, Vec<_>) = result;
   info!(elapsed_ms = verify_ms, "verify");
+
+  let snark_bytes = bincode::serialize(&snark).unwrap().len();
+  info!(bytes = snark_bytes, "snark_size");
 
   info!(
     num_step_circuits = public_values_step.len(),
