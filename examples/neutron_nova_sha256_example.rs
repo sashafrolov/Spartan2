@@ -9,10 +9,7 @@
 mod sha256_circuit;
 
 use sha256_circuit::Sha256Circuit;
-use spartan2::{
-  neutronnova_zk::NeutronNovaZkSNARK,
-  provider::T256HyraxEngine,
-};
+use spartan2::{neutronnova_zk::NeutronNovaZkSNARK, provider::T256HyraxEngine};
 use std::time::Instant;
 use tracing::{info, info_span};
 

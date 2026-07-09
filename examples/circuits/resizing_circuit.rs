@@ -3,10 +3,8 @@
 #[path = "utils.rs"]
 mod utils;
 use utils::{
-  read_mono_png,
-  create_resizing_matrix, create_resizing_sparse,
-  sparse_dense_matmul_u64, dense_sparse_matmul_u64,
-  vector_matrix_product, matrix_vector_product,
+  create_resizing_matrix, create_resizing_sparse, dense_sparse_matmul_u64, matrix_vector_product,
+  read_mono_png, sparse_dense_matmul_u64, vector_matrix_product,
 };
 
 use bellpepper_core::{ConstraintSystem, LinearCombination, SynthesisError, num::AllocatedNum};
@@ -16,7 +14,10 @@ use spartan2::traits::{Engine, circuit::SpartanCircuit};
 
 pub const BYTES_PER_FIELD_ELEMENT: usize = 30;
 
-pub fn generate_random_vector<Scalar: PrimeField + PrimeFieldBits>(length: usize, seed: u64) -> Vec<Scalar> {
+pub fn generate_random_vector<Scalar: PrimeField + PrimeFieldBits>(
+  length: usize,
+  seed: u64,
+) -> Vec<Scalar> {
   let mut rng = StdRng::seed_from_u64(seed);
   (0..length)
     .map(|_| Scalar::from_u128(rng.gen_range(0..((1u128 << 127) as u128))))
@@ -62,14 +63,23 @@ impl<Scalar: PrimeField + PrimeFieldBits> ResizingCircuit<Scalar> {
     assert!(height > 0);
     let width = image[0].len();
     assert!(width > 0);
-    assert!(height % 2 == 0, "image height must be even for 2x downscaling");
-    assert!(width % 2 == 0, "image width must be even for 2x downscaling");
+    assert!(
+      height % 2 == 0,
+      "image height must be even for 2x downscaling"
+    );
+    assert!(
+      width % 2 == 0,
+      "image width must be even for 2x downscaling"
+    );
 
     let channel_offset = match channel_letter {
       "R" => 0u64,
       "G" => 1u64,
       "B" => 2u64,
-      _ => panic!("channel_letter must be \"R\", \"G\", or \"B\", got {:?}", channel_letter),
+      _ => panic!(
+        "channel_letter must be \"R\", \"G\", or \"B\", got {:?}",
+        channel_letter
+      ),
     };
     let base = (1u64 << 32) + 18 * index + 6 * channel_offset;
     let r = generate_random_vector(height / 2, base);
@@ -99,7 +109,8 @@ impl<Scalar: PrimeField + PrimeFieldBits> ResizingCircuit<Scalar> {
       });
 
     // Compute 2x resized image (implemented with sparse matrix mul. for Freivald's reasons)
-    let image_u64: Vec<Vec<u64>> = image.iter()
+    let image_u64: Vec<Vec<u64>> = image
+      .iter()
       .map(|row| row.iter().map(|&v| v as u64).collect())
       .collect();
     let resize_v_sparse = create_resizing_sparse(height, height / 2, false);
@@ -108,7 +119,8 @@ impl<Scalar: PrimeField + PrimeFieldBits> ResizingCircuit<Scalar> {
     let convolution_result = dense_sparse_matmul_u64(&row_wise, &resize_h_sparse, width / 2);
 
     // Both sides of the multiplication are in fixed point and add a 2^16 scaling factor, remove it.
-    let edited_image: Vec<Vec<u8>> = convolution_result.iter()
+    let edited_image: Vec<Vec<u8>> = convolution_result
+      .iter()
       .map(|row| row.iter().map(|&v| (v >> 32) as u8).collect())
       .collect();
 
@@ -136,7 +148,7 @@ impl<Scalar: PrimeField + PrimeFieldBits> ResizingCircuit<Scalar> {
     let resize_v_f: Vec<Vec<Scalar>> = create_resizing_matrix(height, height / 2, false);
     let resize_h_f: Vec<Vec<Scalar>> = create_resizing_matrix(width, width / 2, true);
     let rTA = vector_matrix_product(&r, &resize_v_f);
-    let As  = matrix_vector_product(&resize_h_f, &s);
+    let As = matrix_vector_product(&resize_h_f, &s);
 
     Self {
       image,
@@ -364,8 +376,7 @@ impl<E: Engine> SpartanCircuit<E> for ResizingCircuit<E::Scalar> {
       let mut running_sum = E::Scalar::ZERO;
 
       for ((j, x), y) in row.iter().enumerate().zip(allocated_s.iter()) {
-        running_sum =
-          running_sum + E::Scalar::from(self.convolution_result[i][j]) * self.s[j];
+        running_sum = running_sum + E::Scalar::from(self.convolution_result[i][j]) * self.s[j];
 
         let partial_sum_var = AllocatedNum::alloc(
           cs.namespace(|| format!("Row {i} Fs partial sum {j}")),
@@ -525,14 +536,18 @@ impl<E: Engine> SpartanCircuit<E> for ResizingCircuit<E::Scalar> {
         cs.enforce(
           || format!("byte check LogUp RHS partial sum constraint {b}"),
           |lc| lc + partial_sum_var.get_variable() - prev.get_variable(),
-          |lc| lc + allocated_logup_challenge_1.get_variable() + (E::Scalar::from_u128(b), CS::one()),
+          |lc| {
+            lc + allocated_logup_challenge_1.get_variable() + (E::Scalar::from_u128(b), CS::one())
+          },
           |lc| lc + mult_var.get_variable(),
         );
       } else {
         cs.enforce(
           || format!("byte check LogUp RHS partial sum constraint {b}"),
           |lc| lc + partial_sum_var.get_variable(),
-          |lc| lc + allocated_logup_challenge_1.get_variable() + (E::Scalar::from_u128(b), CS::one()),
+          |lc| {
+            lc + allocated_logup_challenge_1.get_variable() + (E::Scalar::from_u128(b), CS::one())
+          },
           |lc| lc + mult_var.get_variable(),
         );
       }
@@ -588,9 +603,11 @@ impl<E: Engine> SpartanCircuit<E> for ResizingCircuit<E::Scalar> {
       for j in 0..allocated_convolution_result[i].len() {
         cs.enforce(
           || format!("convolution decomposition {i} {j}"),
-          |lc| lc + allocated_chunk_1[i][j].get_variable()
-                  + (scale_2, allocated_chunk_2[i][j].get_variable())
-                  + (scale_3, allocated_edited_image[i][j].get_variable()),
+          |lc| {
+            lc + allocated_chunk_1[i][j].get_variable()
+              + (scale_2, allocated_chunk_2[i][j].get_variable())
+              + (scale_3, allocated_edited_image[i][j].get_variable())
+          },
           |lc| lc + CS::one(),
           |lc| lc + allocated_convolution_result[i][j].get_variable(),
         );
@@ -692,14 +709,18 @@ impl<E: Engine> SpartanCircuit<E> for ResizingCircuit<E::Scalar> {
         cs.enforce(
           || format!("logup 2 RHS partial sum constraint {b}"),
           |lc| lc + partial_sum_var.get_variable() - prev.get_variable(),
-          |lc| lc + allocated_logup_challenge_2.get_variable() + (E::Scalar::from_u128(b), CS::one()),
+          |lc| {
+            lc + allocated_logup_challenge_2.get_variable() + (E::Scalar::from_u128(b), CS::one())
+          },
           |lc| lc + mult_var.get_variable(),
         );
       } else {
         cs.enforce(
           || format!("logup 2 RHS partial sum constraint {b}"),
           |lc| lc + partial_sum_var.get_variable(),
-          |lc| lc + allocated_logup_challenge_2.get_variable() + (E::Scalar::from_u128(b), CS::one()),
+          |lc| {
+            lc + allocated_logup_challenge_2.get_variable() + (E::Scalar::from_u128(b), CS::one())
+          },
           |lc| lc + mult_var.get_variable(),
         );
       }
@@ -749,11 +770,13 @@ impl<E: Engine> SpartanCircuit<E> for ResizingCircuit<E::Scalar> {
 
     for (k, (lc, scalar)) in packed_lcs.iter().zip(packed_scalars.iter()).enumerate() {
       if let Some(prev) = &input_poly_eval_prev {
-        input_poly_eval_scalar = input_poly_eval_scalar * self.input_polynomial_interpolation_challenge + scalar;
+        input_poly_eval_scalar =
+          input_poly_eval_scalar * self.input_polynomial_interpolation_challenge + scalar;
 
-        let input_eval_var = AllocatedNum::alloc(cs.namespace(|| format!("input poly eval {k}")), || {
-          Ok(input_poly_eval_scalar)
-        })?;
+        let input_eval_var =
+          AllocatedNum::alloc(cs.namespace(|| format!("input poly eval {k}")), || {
+            Ok(input_poly_eval_scalar)
+          })?;
 
         cs.enforce(
           || format!("input poly eval constraint {k}"),
@@ -766,9 +789,10 @@ impl<E: Engine> SpartanCircuit<E> for ResizingCircuit<E::Scalar> {
       } else {
         input_poly_eval_scalar = *scalar;
 
-        let input_eval_var = AllocatedNum::alloc(cs.namespace(|| format!("input poly eval {k}")), || {
-          Ok(input_poly_eval_scalar)
-        })?;
+        let input_eval_var =
+          AllocatedNum::alloc(cs.namespace(|| format!("input poly eval {k}")), || {
+            Ok(input_poly_eval_scalar)
+          })?;
 
         cs.enforce(
           || format!("input poly eval constraint {k}"),
@@ -781,10 +805,10 @@ impl<E: Engine> SpartanCircuit<E> for ResizingCircuit<E::Scalar> {
       }
     }
     let input_poly_eval = input_poly_eval_prev.unwrap();
-    let public_input_poly_eval = AllocatedNum::alloc_input(
-      cs.namespace(|| "public_input_poly_eval"),
-      || Ok(self.public_input_poly_eval),
-    )?;
+    let public_input_poly_eval =
+      AllocatedNum::alloc_input(cs.namespace(|| "public_input_poly_eval"), || {
+        Ok(self.public_input_poly_eval)
+      })?;
     cs.enforce(
       || "public_input_poly_eval equality",
       |lc| lc + CS::one(),
@@ -824,13 +848,19 @@ impl<E: Engine> SpartanCircuit<E> for ResizingCircuit<E::Scalar> {
     let mut output_poly_eval_prev: Option<AllocatedNum<E::Scalar>> = None;
     let mut output_poly_eval_scalar = E::Scalar::ZERO;
 
-    for (k, (lc, scalar)) in output_packed_lcs.iter().zip(output_packed_scalars.iter()).enumerate() {
+    for (k, (lc, scalar)) in output_packed_lcs
+      .iter()
+      .zip(output_packed_scalars.iter())
+      .enumerate()
+    {
       if let Some(prev) = &output_poly_eval_prev {
-        output_poly_eval_scalar = output_poly_eval_scalar * self.output_polynomial_interpolation_challenge + scalar;
+        output_poly_eval_scalar =
+          output_poly_eval_scalar * self.output_polynomial_interpolation_challenge + scalar;
 
-        let output_eval_var = AllocatedNum::alloc(cs.namespace(|| format!("output poly eval {k}")), || {
-          Ok(output_poly_eval_scalar)
-        })?;
+        let output_eval_var =
+          AllocatedNum::alloc(cs.namespace(|| format!("output poly eval {k}")), || {
+            Ok(output_poly_eval_scalar)
+          })?;
 
         cs.enforce(
           || format!("output poly eval constraint {k}"),
@@ -843,9 +873,10 @@ impl<E: Engine> SpartanCircuit<E> for ResizingCircuit<E::Scalar> {
       } else {
         output_poly_eval_scalar = *scalar;
 
-        let output_eval_var = AllocatedNum::alloc(cs.namespace(|| format!("output poly eval {k}")), || {
-          Ok(output_poly_eval_scalar)
-        })?;
+        let output_eval_var =
+          AllocatedNum::alloc(cs.namespace(|| format!("output poly eval {k}")), || {
+            Ok(output_poly_eval_scalar)
+          })?;
 
         cs.enforce(
           || format!("output poly eval constraint {k}"),
@@ -858,10 +889,10 @@ impl<E: Engine> SpartanCircuit<E> for ResizingCircuit<E::Scalar> {
       }
     }
     let output_poly_eval = output_poly_eval_prev.unwrap();
-    let public_output_poly_eval = AllocatedNum::alloc_input(
-      cs.namespace(|| "public_output_poly_eval"),
-      || Ok(self.public_output_poly_eval),
-    )?;
+    let public_output_poly_eval =
+      AllocatedNum::alloc_input(cs.namespace(|| "public_output_poly_eval"), || {
+        Ok(self.public_output_poly_eval)
+      })?;
     cs.enforce(
       || "public_output_poly_eval equality",
       |lc| lc + CS::one(),

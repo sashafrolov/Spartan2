@@ -9,7 +9,6 @@
 //! Since we are in the non-recursive setting, we simply fold a batch of instances into one (all at once, via multi-folding)
 //! and then use Spartan to prove that folded instance.
 //! The proof system implemented here provides zero-knowledge via Nova's folding scheme.
-use crate::start_span;
 use crate::{
   Commitment, CommitmentKey, DEFAULT_COMMITMENT_WIDTH, VerifierKey,
   bellpepper::{
@@ -39,6 +38,7 @@ use crate::{
     R1CSInstance, R1CSShape, R1CSWitness, RelaxedR1CSInstance, SplitMultiRoundR1CSInstance,
     SplitMultiRoundR1CSShape, SplitR1CSInstance, SplitR1CSShape, weights_from_r,
   },
+  start_span,
   sumcheck::SumcheckProof,
   traits::{
     Engine,

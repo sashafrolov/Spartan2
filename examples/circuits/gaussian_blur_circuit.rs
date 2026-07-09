@@ -3,11 +3,9 @@
 #[path = "utils.rs"]
 mod utils;
 use utils::{
-  read_mono_png,
-  create_gblur_matrix, create_gblur_matrix_u64,
-  matrix_matrix_product_band_left_u64, matrix_matrix_product_band_right_u64,
-  vector_matrix_product, matrix_vector_product,
-  SIGMA, GBLUR_RADIUS,
+  GBLUR_RADIUS, SIGMA, create_gblur_matrix, create_gblur_matrix_u64,
+  matrix_matrix_product_band_left_u64, matrix_matrix_product_band_right_u64, matrix_vector_product,
+  read_mono_png, vector_matrix_product,
 };
 
 use bellpepper_core::{ConstraintSystem, LinearCombination, SynthesisError, num::AllocatedNum};
@@ -17,7 +15,10 @@ use spartan2::traits::{Engine, circuit::SpartanCircuit};
 
 pub const BYTES_PER_FIELD_ELEMENT: usize = 30;
 
-pub fn generate_random_vector<Scalar: PrimeField + PrimeFieldBits>(length: usize, seed: u64) -> Vec<Scalar> {
+pub fn generate_random_vector<Scalar: PrimeField + PrimeFieldBits>(
+  length: usize,
+  seed: u64,
+) -> Vec<Scalar> {
   let mut rng = StdRng::seed_from_u64(seed);
   (0..length)
     .map(|_| Scalar::from_u128(rng.gen_range(0..((1u128 << 127) as u128))))
@@ -69,7 +70,10 @@ impl<Scalar: PrimeField + PrimeFieldBits> GaussianBlurCircuit<Scalar> {
       "R" => 0u64,
       "G" => 1u64,
       "B" => 2u64,
-      _ => panic!("channel_letter must be \"R\", \"G\", or \"B\", got {:?}", channel_letter),
+      _ => panic!(
+        "channel_letter must be \"R\", \"G\", or \"B\", got {:?}",
+        channel_letter
+      ),
     };
     let base = (1u64 << 32) + 18 * index + 6 * channel_offset;
     let r = generate_random_vector(height, base);
@@ -99,16 +103,19 @@ impl<Scalar: PrimeField + PrimeFieldBits> GaussianBlurCircuit<Scalar> {
       });
 
     // Compute gaussian blur via u64 band matrix multiplication then convert back to bytes.
-    let image_u64: Vec<Vec<u64>> = image.iter()
+    let image_u64: Vec<Vec<u64>> = image
+      .iter()
       .map(|row| row.iter().map(|&v| v as u64).collect())
       .collect();
     let gblur_v_u64 = create_gblur_matrix_u64(height, SIGMA, GBLUR_RADIUS);
-    let gblur_h_u64 = create_gblur_matrix_u64(width,  SIGMA, GBLUR_RADIUS);
+    let gblur_h_u64 = create_gblur_matrix_u64(width, SIGMA, GBLUR_RADIUS);
     let row_wise = matrix_matrix_product_band_left_u64(&gblur_v_u64, &image_u64, GBLUR_RADIUS);
-    let convolution_result = matrix_matrix_product_band_right_u64(&row_wise, &gblur_h_u64, GBLUR_RADIUS);
+    let convolution_result =
+      matrix_matrix_product_band_right_u64(&row_wise, &gblur_h_u64, GBLUR_RADIUS);
 
     // KERNEL_SCALE = 1<<16; two multiplications scale by (1<<16)^2 = 1<<32.
-    let edited_image: Vec<Vec<u8>> = convolution_result.iter()
+    let edited_image: Vec<Vec<u8>> = convolution_result
+      .iter()
       .map(|row| row.iter().map(|&v| (v >> 32) as u8).collect())
       .collect();
 
@@ -133,9 +140,9 @@ impl<Scalar: PrimeField + PrimeFieldBits> GaussianBlurCircuit<Scalar> {
     let target_image = edited_image.clone();
 
     let gblur_v_f: Vec<Vec<Scalar>> = create_gblur_matrix(height, SIGMA, GBLUR_RADIUS);
-    let gblur_h_f: Vec<Vec<Scalar>> = create_gblur_matrix(width,  SIGMA, GBLUR_RADIUS);
+    let gblur_h_f: Vec<Vec<Scalar>> = create_gblur_matrix(width, SIGMA, GBLUR_RADIUS);
     let rTA = vector_matrix_product(&r, &gblur_v_f);
-    let As  = matrix_vector_product(&gblur_h_f, &s);
+    let As = matrix_vector_product(&gblur_h_f, &s);
 
     Self {
       image,
@@ -362,8 +369,7 @@ impl<E: Engine> SpartanCircuit<E> for GaussianBlurCircuit<E::Scalar> {
       let mut running_sum = E::Scalar::ZERO;
 
       for ((j, x), y) in row.iter().enumerate().zip(allocated_s.iter()) {
-        running_sum =
-          running_sum + E::Scalar::from(self.convolution_result[i][j]) * self.s[j];
+        running_sum = running_sum + E::Scalar::from(self.convolution_result[i][j]) * self.s[j];
 
         let partial_sum_var = AllocatedNum::alloc(
           cs.namespace(|| format!("Row {i} Fs partial sum {j}")),
@@ -523,14 +529,18 @@ impl<E: Engine> SpartanCircuit<E> for GaussianBlurCircuit<E::Scalar> {
         cs.enforce(
           || format!("byte check LogUp RHS partial sum constraint {b}"),
           |lc| lc + partial_sum_var.get_variable() - prev.get_variable(),
-          |lc| lc + allocated_logup_challenge_1.get_variable() + (E::Scalar::from_u128(b), CS::one()),
+          |lc| {
+            lc + allocated_logup_challenge_1.get_variable() + (E::Scalar::from_u128(b), CS::one())
+          },
           |lc| lc + mult_var.get_variable(),
         );
       } else {
         cs.enforce(
           || format!("byte check LogUp RHS partial sum constraint {b}"),
           |lc| lc + partial_sum_var.get_variable(),
-          |lc| lc + allocated_logup_challenge_1.get_variable() + (E::Scalar::from_u128(b), CS::one()),
+          |lc| {
+            lc + allocated_logup_challenge_1.get_variable() + (E::Scalar::from_u128(b), CS::one())
+          },
           |lc| lc + mult_var.get_variable(),
         );
       }
@@ -586,9 +596,11 @@ impl<E: Engine> SpartanCircuit<E> for GaussianBlurCircuit<E::Scalar> {
       for j in 0..allocated_convolution_result[i].len() {
         cs.enforce(
           || format!("convolution decomposition {i} {j}"),
-          |lc| lc + allocated_chunk_1[i][j].get_variable()
-                  + (scale_2, allocated_chunk_2[i][j].get_variable())
-                  + (scale_3, allocated_edited_image[i][j].get_variable()),
+          |lc| {
+            lc + allocated_chunk_1[i][j].get_variable()
+              + (scale_2, allocated_chunk_2[i][j].get_variable())
+              + (scale_3, allocated_edited_image[i][j].get_variable())
+          },
           |lc| lc + CS::one(),
           |lc| lc + allocated_convolution_result[i][j].get_variable(),
         );
@@ -690,14 +702,18 @@ impl<E: Engine> SpartanCircuit<E> for GaussianBlurCircuit<E::Scalar> {
         cs.enforce(
           || format!("logup 2 RHS partial sum constraint {b}"),
           |lc| lc + partial_sum_var.get_variable() - prev.get_variable(),
-          |lc| lc + allocated_logup_challenge_2.get_variable() + (E::Scalar::from_u128(b), CS::one()),
+          |lc| {
+            lc + allocated_logup_challenge_2.get_variable() + (E::Scalar::from_u128(b), CS::one())
+          },
           |lc| lc + mult_var.get_variable(),
         );
       } else {
         cs.enforce(
           || format!("logup 2 RHS partial sum constraint {b}"),
           |lc| lc + partial_sum_var.get_variable(),
-          |lc| lc + allocated_logup_challenge_2.get_variable() + (E::Scalar::from_u128(b), CS::one()),
+          |lc| {
+            lc + allocated_logup_challenge_2.get_variable() + (E::Scalar::from_u128(b), CS::one())
+          },
           |lc| lc + mult_var.get_variable(),
         );
       }
@@ -749,11 +765,13 @@ impl<E: Engine> SpartanCircuit<E> for GaussianBlurCircuit<E::Scalar> {
 
     for (k, (lc, scalar)) in packed_lcs.iter().zip(packed_scalars.iter()).enumerate() {
       if let Some(prev) = &input_poly_eval_prev {
-        input_poly_eval_scalar = input_poly_eval_scalar * self.input_polynomial_interpolation_challenge + scalar;
+        input_poly_eval_scalar =
+          input_poly_eval_scalar * self.input_polynomial_interpolation_challenge + scalar;
 
-        let input_eval_var = AllocatedNum::alloc(cs.namespace(|| format!("input poly eval {k}")), || {
-          Ok(input_poly_eval_scalar)
-        })?;
+        let input_eval_var =
+          AllocatedNum::alloc(cs.namespace(|| format!("input poly eval {k}")), || {
+            Ok(input_poly_eval_scalar)
+          })?;
 
         cs.enforce(
           || format!("input poly eval constraint {k}"),
@@ -766,9 +784,10 @@ impl<E: Engine> SpartanCircuit<E> for GaussianBlurCircuit<E::Scalar> {
       } else {
         input_poly_eval_scalar = *scalar;
 
-        let input_eval_var = AllocatedNum::alloc(cs.namespace(|| format!("input poly eval {k}")), || {
-          Ok(input_poly_eval_scalar)
-        })?;
+        let input_eval_var =
+          AllocatedNum::alloc(cs.namespace(|| format!("input poly eval {k}")), || {
+            Ok(input_poly_eval_scalar)
+          })?;
 
         cs.enforce(
           || format!("input poly eval constraint {k}"),
@@ -781,10 +800,10 @@ impl<E: Engine> SpartanCircuit<E> for GaussianBlurCircuit<E::Scalar> {
       }
     }
     let input_poly_eval = input_poly_eval_prev.unwrap();
-    let public_input_poly_eval = AllocatedNum::alloc_input(
-      cs.namespace(|| "public_input_poly_eval"),
-      || Ok(self.public_input_poly_eval),
-    )?;
+    let public_input_poly_eval =
+      AllocatedNum::alloc_input(cs.namespace(|| "public_input_poly_eval"), || {
+        Ok(self.public_input_poly_eval)
+      })?;
     cs.enforce(
       || "public_input_poly_eval equality",
       |lc| lc + CS::one(),
@@ -827,13 +846,19 @@ impl<E: Engine> SpartanCircuit<E> for GaussianBlurCircuit<E::Scalar> {
     let mut output_poly_eval_prev: Option<AllocatedNum<E::Scalar>> = None;
     let mut output_poly_eval_scalar = E::Scalar::ZERO;
 
-    for (k, (lc, scalar)) in output_packed_lcs.iter().zip(output_packed_scalars.iter()).enumerate() {
+    for (k, (lc, scalar)) in output_packed_lcs
+      .iter()
+      .zip(output_packed_scalars.iter())
+      .enumerate()
+    {
       if let Some(prev) = &output_poly_eval_prev {
-        output_poly_eval_scalar = output_poly_eval_scalar * self.output_polynomial_interpolation_challenge + scalar;
+        output_poly_eval_scalar =
+          output_poly_eval_scalar * self.output_polynomial_interpolation_challenge + scalar;
 
-        let output_eval_var = AllocatedNum::alloc(cs.namespace(|| format!("output poly eval {k}")), || {
-          Ok(output_poly_eval_scalar)
-        })?;
+        let output_eval_var =
+          AllocatedNum::alloc(cs.namespace(|| format!("output poly eval {k}")), || {
+            Ok(output_poly_eval_scalar)
+          })?;
 
         cs.enforce(
           || format!("output poly eval constraint {k}"),
@@ -846,9 +871,10 @@ impl<E: Engine> SpartanCircuit<E> for GaussianBlurCircuit<E::Scalar> {
       } else {
         output_poly_eval_scalar = *scalar;
 
-        let output_eval_var = AllocatedNum::alloc(cs.namespace(|| format!("output poly eval {k}")), || {
-          Ok(output_poly_eval_scalar)
-        })?;
+        let output_eval_var =
+          AllocatedNum::alloc(cs.namespace(|| format!("output poly eval {k}")), || {
+            Ok(output_poly_eval_scalar)
+          })?;
 
         cs.enforce(
           || format!("output poly eval constraint {k}"),
@@ -861,10 +887,10 @@ impl<E: Engine> SpartanCircuit<E> for GaussianBlurCircuit<E::Scalar> {
       }
     }
     let output_poly_eval = output_poly_eval_prev.unwrap();
-    let public_output_poly_eval = AllocatedNum::alloc_input(
-      cs.namespace(|| "public_output_poly_eval"),
-      || Ok(self.public_output_poly_eval),
-    )?;
+    let public_output_poly_eval =
+      AllocatedNum::alloc_input(cs.namespace(|| "public_output_poly_eval"), || {
+        Ok(self.public_output_poly_eval)
+      })?;
     cs.enforce(
       || "public_output_poly_eval equality",
       |lc| lc + CS::one(),

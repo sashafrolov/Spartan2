@@ -1,6 +1,4 @@
-use image::ImageReader;
-use image::GrayImage;
-use image::RgbImage;
+use image::{GrayImage, ImageReader, RgbImage};
 
 use ff::{Field, PrimeField};
 use rayon::prelude::*;
@@ -26,7 +24,14 @@ pub fn read_color_png(path: &str) -> Vec<Vec<(u8, u8, u8)>> {
 
   let (width, height) = img.dimensions();
   (0..height)
-    .map(|y| (0..width).map(|x| { let p = img.get_pixel(x, y); (p[0], p[1], p[2]) }).collect())
+    .map(|y| {
+      (0..width)
+        .map(|x| {
+          let p = img.get_pixel(x, y);
+          (p[0], p[1], p[2])
+        })
+        .collect()
+    })
     .collect()
 }
 
@@ -100,7 +105,10 @@ pub fn matrix_matrix_product<F: PrimeField>(a: &[Vec<F>], b: &[Vec<F>]) -> Vec<V
   let b_height = b.len();
   assert!(b_height > 0);
   let b_width = b[0].len();
-  assert_eq!(a_width, b_height, "Matrix dimensions incompatible for multiplication");
+  assert_eq!(
+    a_width, b_height,
+    "Matrix dimensions incompatible for multiplication"
+  );
 
   a.par_iter()
     .map(|a_row| {
@@ -128,7 +136,10 @@ pub fn matrix_matrix_product_band_left<F: PrimeField>(
   let b_height = b.len();
   assert!(b_height > 0);
   let b_width = b[0].len();
-  assert_eq!(a_width, b_height, "Matrix dimensions incompatible for multiplication");
+  assert_eq!(
+    a_width, b_height,
+    "Matrix dimensions incompatible for multiplication"
+  );
 
   a.par_iter()
     .enumerate()
@@ -159,7 +170,10 @@ pub fn matrix_matrix_product_band_right<F: PrimeField>(
   let b_height = b.len();
   assert!(b_height > 0);
   let b_width = b[0].len();
-  assert_eq!(a_width, b_height, "Matrix dimensions incompatible for multiplication");
+  assert_eq!(
+    a_width, b_height,
+    "Matrix dimensions incompatible for multiplication"
+  );
 
   a.par_iter()
     .map(|a_row| {
@@ -193,7 +207,11 @@ pub fn create_tridiagonal_matrix<F: PrimeField>(size: usize) -> Vec<Vec<F>> {
   matrix
 }
 
-pub fn create_resizing_matrix<F: PrimeField>(src_size: usize, dst_size: usize, for_horizontal: bool) -> Vec<Vec<F>> {
+pub fn create_resizing_matrix<F: PrimeField>(
+  src_size: usize,
+  dst_size: usize,
+  for_horizontal: bool,
+) -> Vec<Vec<F>> {
   let matrix = create_resize_matrix_impl(src_size, dst_size);
   if for_horizontal {
     transpose(matrix)
@@ -244,7 +262,10 @@ pub fn transpose<F: PrimeField>(matrix: Vec<Vec<F>>) -> Vec<Vec<F>> {
 fn gaussian_kernel1d(sigma: f64, radius: i32) -> Vec<f64> {
   let sigma2 = sigma * sigma;
   let x: Vec<f64> = (-radius..=radius).map(|i| i as f64).collect();
-  let mut phi_x: Vec<f64> = x.iter().map(|&xi| (-0.5 / sigma2 * xi * xi).exp()).collect();
+  let mut phi_x: Vec<f64> = x
+    .iter()
+    .map(|&xi| (-0.5 / sigma2 * xi * xi).exp())
+    .collect();
   let sum: f64 = phi_x.iter().sum();
   phi_x.iter_mut().for_each(|val| *val /= sum);
   phi_x
@@ -278,7 +299,11 @@ pub fn create_gblur_matrix<F: PrimeField>(size: usize, sigma: f64, radius: usize
   matrix
 }
 
-pub fn create_matrix<F: PrimeField>(matrix_type: MatrixType, size: usize, need_transpose: bool) -> Vec<Vec<F>> {
+pub fn create_matrix<F: PrimeField>(
+  matrix_type: MatrixType,
+  size: usize,
+  need_transpose: bool,
+) -> Vec<Vec<F>> {
   match matrix_type {
     MatrixType::Tridiagonal => create_tridiagonal_matrix(size),
     MatrixType::Resizing => create_resizing_matrix(size, size / 2, need_transpose),
@@ -324,7 +349,10 @@ pub fn matrix_matrix_product_band_left_u64(
   let b_height = b.len();
   assert!(b_height > 0);
   let b_width = b[0].len();
-  assert_eq!(a_width, b_height, "Matrix dimensions incompatible for multiplication");
+  assert_eq!(
+    a_width, b_height,
+    "Matrix dimensions incompatible for multiplication"
+  );
 
   a.iter()
     .enumerate()
@@ -347,7 +375,9 @@ pub fn matrix_matrix_product_band_left_u64(
 pub fn inner_product_u64(u: &[u64], v: &[u64]) -> u64 {
   assert!(!u.is_empty());
   assert_eq!(u.len(), v.len(), "Vectors must have the same length");
-  u.iter().zip(v.iter()).fold(0u64, |acc, (&a, &b)| acc.wrapping_add(a.wrapping_mul(b)))
+  u.iter()
+    .zip(v.iter())
+    .fold(0u64, |acc, (&a, &b)| acc.wrapping_add(a.wrapping_mul(b)))
 }
 
 pub fn matrix_vector_product_u64(a: &[Vec<u64>], v: &[u64]) -> Vec<u64> {
@@ -355,7 +385,12 @@ pub fn matrix_vector_product_u64(a: &[Vec<u64>], v: &[u64]) -> Vec<u64> {
   assert!(height > 0);
   assert_eq!(a[0].len(), v.len());
   a.iter()
-    .map(|row| row.iter().zip(v.iter()).fold(0u64, |acc, (&a, &b)| acc.wrapping_add(a.wrapping_mul(b))))
+    .map(|row| {
+      row
+        .iter()
+        .zip(v.iter())
+        .fold(0u64, |acc, (&a, &b)| acc.wrapping_add(a.wrapping_mul(b)))
+    })
     .collect()
 }
 
@@ -380,7 +415,10 @@ pub fn matrix_matrix_product_u64(a: &[Vec<u64>], b: &[Vec<u64>]) -> Vec<Vec<u64>
   let b_height = b.len();
   assert!(b_height > 0);
   let b_width = b[0].len();
-  assert_eq!(a_width, b_height, "Matrix dimensions incompatible for multiplication");
+  assert_eq!(
+    a_width, b_height,
+    "Matrix dimensions incompatible for multiplication"
+  );
 
   a.iter()
     .map(|a_row| {
@@ -408,7 +446,10 @@ pub fn matrix_matrix_product_band_right_u64(
   let b_height = b.len();
   assert!(b_height > 0);
   let b_width = b[0].len();
-  assert_eq!(a_width, b_height, "Matrix dimensions incompatible for multiplication");
+  assert_eq!(
+    a_width, b_height,
+    "Matrix dimensions incompatible for multiplication"
+  );
 
   a.iter()
     .map(|a_row| {
@@ -432,15 +473,27 @@ pub fn create_tridiagonal_matrix_u64(size: usize) -> Vec<Vec<u64>> {
   let mut matrix = vec![vec![0u64; size]; size];
   for i in 0..size {
     matrix[i][i] = 1;
-    if i + 1 < size { matrix[i][i + 1] = 1; }
-    if i > 0       { matrix[i][i - 1] = 1; }
+    if i + 1 < size {
+      matrix[i][i + 1] = 1;
+    }
+    if i > 0 {
+      matrix[i][i - 1] = 1;
+    }
   }
   matrix
 }
 
-pub fn create_resizing_matrix_u64(src_size: usize, dst_size: usize, for_horizontal: bool) -> Vec<Vec<u64>> {
+pub fn create_resizing_matrix_u64(
+  src_size: usize,
+  dst_size: usize,
+  for_horizontal: bool,
+) -> Vec<Vec<u64>> {
   let matrix = create_resize_matrix_impl_u64(src_size, dst_size);
-  if for_horizontal { transpose_u64(matrix) } else { matrix }
+  if for_horizontal {
+    transpose_u64(matrix)
+  } else {
+    matrix
+  }
 }
 
 fn create_resize_matrix_impl_u64(src_size: usize, dst_size: usize) -> Vec<Vec<u64>> {
@@ -452,7 +505,11 @@ fn create_resize_matrix_impl_u64(src_size: usize, dst_size: usize) -> Vec<Vec<u6
     let xx_inc = x_inc & 0xffff;
     let xx = (xx_inc * (1 << FILTER_BITS)) / x_inc;
     for j in 0..filter_size {
-      let coeff = if j == 0 { (1u64 << FILTER_BITS) - xx as u64 } else { xx as u64 };
+      let coeff = if j == 0 {
+        (1u64 << FILTER_BITS) - xx as u64
+      } else {
+        xx as u64
+      };
       let src_idx = src_pos + j;
       if src_idx < src_size {
         matrix[i][src_idx] = coeff;
@@ -464,7 +521,9 @@ fn create_resize_matrix_impl_u64(src_size: usize, dst_size: usize) -> Vec<Vec<u6
 
 pub fn transpose_u64(matrix: Vec<Vec<u64>>) -> Vec<Vec<u64>> {
   let rows = matrix.len();
-  if rows == 0 { return vec![]; }
+  if rows == 0 {
+    return vec![];
+  }
   let cols = matrix[0].len();
   let mut transposed = vec![vec![0u64; rows]; cols];
   for i in 0..rows {
@@ -475,7 +534,11 @@ pub fn transpose_u64(matrix: Vec<Vec<u64>>) -> Vec<Vec<u64>> {
   transposed
 }
 
-pub fn create_matrix_u64(matrix_type: MatrixType, size: usize, need_transpose: bool) -> Vec<Vec<u64>> {
+pub fn create_matrix_u64(
+  matrix_type: MatrixType,
+  size: usize,
+  need_transpose: bool,
+) -> Vec<Vec<u64>> {
   match matrix_type {
     MatrixType::Tridiagonal => create_tridiagonal_matrix_u64(size),
     MatrixType::Resizing => create_resizing_matrix_u64(size, size / 2, need_transpose),
@@ -491,22 +554,32 @@ pub type SparseMatrix = Vec<Vec<(usize, u64)>>;
 // Builds the sparse resizing matrix directly without materialising the dense form.
 // for_horizontal=false → dst_size × src_size (left-multiply)
 // for_horizontal=true  → src_size × dst_size (transposed, right-multiply)
-pub fn create_resizing_sparse(src_size: usize, dst_size: usize, for_horizontal: bool) -> SparseMatrix {
+pub fn create_resizing_sparse(
+  src_size: usize,
+  dst_size: usize,
+  for_horizontal: bool,
+) -> SparseMatrix {
   assert!(src_size > 0 && dst_size > 0);
   let n_rows = if for_horizontal { src_size } else { dst_size };
   let mut rows: SparseMatrix = vec![Vec::new(); n_rows];
   let x_inc = ((src_size << 16) / dst_size + 1) >> 1;
   for i in 0..dst_size {
     let src_pos = (i * x_inc) >> 15;
-    let xx_inc  = x_inc & 0xffff;
-    let xx      = (xx_inc * (1 << FILTER_BITS)) / x_inc;
+    let xx_inc = x_inc & 0xffff;
+    let xx = (xx_inc * (1 << FILTER_BITS)) / x_inc;
     for j in 0..4usize {
-      let coeff: u64 = if j == 0 { (1u64 << FILTER_BITS) - xx as u64 } else { xx as u64 };
-      if coeff == 0 { continue; }
+      let coeff: u64 = if j == 0 {
+        (1u64 << FILTER_BITS) - xx as u64
+      } else {
+        xx as u64
+      };
+      if coeff == 0 {
+        continue;
+      }
       let src_idx = src_pos + j;
       if src_idx < src_size {
         if for_horizontal {
-          rows[src_idx].push((i, coeff));  // transposed: row=src_idx, col=i
+          rows[src_idx].push((i, coeff)); // transposed: row=src_idx, col=i
         } else {
           rows[i].push((src_idx, coeff));
         }
@@ -540,7 +613,9 @@ pub fn dense_sparse_matmul_u64(a: &[Vec<u64>], b: &SparseMatrix, b_cols: usize) 
       let mut out = vec![0u64; b_cols];
       for (k, b_row) in b.iter().enumerate() {
         let a_val = a_row[k];
-        if a_val == 0 { continue; }
+        if a_val == 0 {
+          continue;
+        }
         for &(j, v) in b_row {
           out[j] = out[j].wrapping_add(a_val.wrapping_mul(v));
         }
@@ -554,8 +629,7 @@ pub fn dense_sparse_matmul_u64(a: &[Vec<u64>], b: &SparseMatrix, b_cols: usize) 
 mod tests {
   use super::*;
   use rand::RngCore;
-  use spartan2::provider::T256HyraxEngine;
-  use spartan2::traits::Engine;
+  use spartan2::{provider::T256HyraxEngine, traits::Engine};
   use std::time::Instant;
 
   type F = <T256HyraxEngine as Engine>::Scalar;
@@ -568,7 +642,11 @@ mod tests {
   fn perf_gblur_band_left() {
     let mut rng = rand::thread_rng();
     let image: Vec<Vec<F>> = (0..IMAGE_HEIGHT)
-      .map(|_| (0..IMAGE_WIDTH).map(|_| F::from(rng.next_u32() as u8 as u64)).collect())
+      .map(|_| {
+        (0..IMAGE_WIDTH)
+          .map(|_| F::from(rng.next_u32() as u8 as u64))
+          .collect()
+      })
       .collect();
 
     let gblur_matrix: Vec<Vec<F>> = create_gblur_matrix(IMAGE_HEIGHT, SIGMA, GBLUR_RADIUS);
@@ -579,7 +657,9 @@ mod tests {
 
     assert_eq!(result.len(), IMAGE_HEIGHT);
     assert_eq!(result[0].len(), IMAGE_WIDTH);
-    println!("matrix_matrix_product_band_left ({IMAGE_HEIGHT}x{IMAGE_HEIGHT} gblur) x ({IMAGE_HEIGHT}x{IMAGE_WIDTH} image): {elapsed:?}");
+    println!(
+      "matrix_matrix_product_band_left ({IMAGE_HEIGHT}x{IMAGE_HEIGHT} gblur) x ({IMAGE_HEIGHT}x{IMAGE_WIDTH} image): {elapsed:?}"
+    );
   }
 
   #[test]
@@ -591,7 +671,11 @@ mod tests {
     let mut rng = rand::thread_rng();
 
     let image_u64: Vec<Vec<u64>> = (0..IMAGE_HEIGHT)
-      .map(|_| (0..IMAGE_WIDTH).map(|_| rng.next_u32() as u8 as u64).collect())
+      .map(|_| {
+        (0..IMAGE_WIDTH)
+          .map(|_| rng.next_u32() as u8 as u64)
+          .collect()
+      })
       .collect();
     let r: Vec<F> = (0..IMAGE_HEIGHT).map(|_| gen_rand_scalar::<F>()).collect();
     let s: Vec<F> = (0..IMAGE_WIDTH).map(|_| gen_rand_scalar::<F>()).collect();
@@ -601,29 +685,32 @@ mod tests {
 
     let t_sub = Instant::now();
     let gblur_v_u64 = create_gblur_matrix_u64(IMAGE_HEIGHT, SIGMA, GBLUR_RADIUS);
-    let gblur_h_u64 = create_gblur_matrix_u64(IMAGE_WIDTH,  SIGMA, GBLUR_RADIUS);
+    let gblur_h_u64 = create_gblur_matrix_u64(IMAGE_WIDTH, SIGMA, GBLUR_RADIUS);
     let row_wise_u64 = matrix_matrix_product_band_left_u64(&gblur_v_u64, &image_u64, GBLUR_RADIUS);
-    let edited_u64   = matrix_matrix_product_band_right_u64(&row_wise_u64, &gblur_h_u64, GBLUR_RADIUS);
+    let edited_u64 =
+      matrix_matrix_product_band_right_u64(&row_wise_u64, &gblur_h_u64, GBLUR_RADIUS);
     let elapsed_u64_matmul = t_sub.elapsed();
 
     // Convert to field for Freivalds
-    let image_f: Vec<Vec<F>> = image_u64.iter()
+    let image_f: Vec<Vec<F>> = image_u64
+      .iter()
       .map(|row| row.iter().map(|&v| F::from(v)).collect())
       .collect();
-    let edited_f: Vec<Vec<F>> = edited_u64.iter()
+    let edited_f: Vec<Vec<F>> = edited_u64
+      .iter()
       .map(|row| row.iter().map(|&v| F::from(v)).collect())
       .collect();
 
     // Freivalds in field
     let t_sub = Instant::now();
     let gblur_v_f: Vec<Vec<F>> = create_gblur_matrix(IMAGE_HEIGHT, SIGMA, GBLUR_RADIUS);
-    let gblur_h_f: Vec<Vec<F>> = create_gblur_matrix(IMAGE_WIDTH,  SIGMA, GBLUR_RADIUS);
-    let rTA         = vector_matrix_product(&r, &gblur_v_f);
-    let As          = matrix_vector_product(&gblur_h_f, &s);
-    let rTAI        = vector_matrix_product(&rTA, &image_f);
-    let rTAIAs      = inner_product(&rTAI, &As);
-    let rTF         = vector_matrix_product(&r, &edited_f);
-    let rTFs        = inner_product(&rTF, &s);
+    let gblur_h_f: Vec<Vec<F>> = create_gblur_matrix(IMAGE_WIDTH, SIGMA, GBLUR_RADIUS);
+    let rTA = vector_matrix_product(&r, &gblur_v_f);
+    let As = matrix_vector_product(&gblur_h_f, &s);
+    let rTAI = vector_matrix_product(&rTA, &image_f);
+    let rTAIAs = inner_product(&rTAI, &As);
+    let rTF = vector_matrix_product(&r, &edited_f);
+    let rTFs = inner_product(&rTF, &s);
     let elapsed_u64_freivalds = t_sub.elapsed();
 
     let elapsed_u64 = t0.elapsed();
@@ -633,43 +720,51 @@ mod tests {
 
     let t_sub = Instant::now();
     let gblur_v_f2: Vec<Vec<F>> = create_gblur_matrix(IMAGE_HEIGHT, SIGMA, GBLUR_RADIUS);
-    let gblur_h_f2: Vec<Vec<F>> = create_gblur_matrix(IMAGE_WIDTH,  SIGMA, GBLUR_RADIUS);
-    let image_f2: Vec<Vec<F>> = image_u64.iter()
+    let gblur_h_f2: Vec<Vec<F>> = create_gblur_matrix(IMAGE_WIDTH, SIGMA, GBLUR_RADIUS);
+    let image_f2: Vec<Vec<F>> = image_u64
+      .iter()
       .map(|row| row.iter().map(|&v| F::from(v)).collect())
       .collect();
-    let row_wise_f2  = matrix_matrix_product_band_left(&gblur_v_f2, &image_f2, GBLUR_RADIUS);
-    let edited_f2    = matrix_matrix_product_band_right(&row_wise_f2, &gblur_h_f2, GBLUR_RADIUS);
+    let row_wise_f2 = matrix_matrix_product_band_left(&gblur_v_f2, &image_f2, GBLUR_RADIUS);
+    let edited_f2 = matrix_matrix_product_band_right(&row_wise_f2, &gblur_h_f2, GBLUR_RADIUS);
     let elapsed_f_matmul = t_sub.elapsed();
 
     let t_sub = Instant::now();
-    let rTA_f        = vector_matrix_product(&r, &gblur_v_f2);
-    let As_f         = matrix_vector_product(&gblur_h_f2, &s);
-    let rTAI_f       = vector_matrix_product(&rTA_f, &image_f2);
-    let rTAIAs_f     = inner_product(&rTAI_f, &As_f);
-    let rTF_f        = vector_matrix_product(&r, &edited_f2);
-    let rTFs_f       = inner_product(&rTF_f, &s);
+    let rTA_f = vector_matrix_product(&r, &gblur_v_f2);
+    let As_f = matrix_vector_product(&gblur_h_f2, &s);
+    let rTAI_f = vector_matrix_product(&rTA_f, &image_f2);
+    let rTAIAs_f = inner_product(&rTAI_f, &As_f);
+    let rTF_f = vector_matrix_product(&r, &edited_f2);
+    let rTFs_f = inner_product(&rTF_f, &s);
     let elapsed_f_freivalds = t_sub.elapsed();
 
     let elapsed_f = t0.elapsed();
 
-    println!("u64-accelerated: {elapsed_u64:?}  (matmul={elapsed_u64_matmul:?}  freivalds={elapsed_u64_freivalds:?})  |  LHS={rTAIAs:?}  RHS={rTFs:?}");
-    println!("pure F:          {elapsed_f:?}  (matmul={elapsed_f_matmul:?}  freivalds={elapsed_f_freivalds:?})  |  LHS={rTAIAs_f:?}  RHS={rTFs_f:?}");
+    println!(
+      "u64-accelerated: {elapsed_u64:?}  (matmul={elapsed_u64_matmul:?}  freivalds={elapsed_u64_freivalds:?})  |  LHS={rTAIAs:?}  RHS={rTFs:?}"
+    );
+    println!(
+      "pure F:          {elapsed_f:?}  (matmul={elapsed_f_matmul:?}  freivalds={elapsed_f_freivalds:?})  |  LHS={rTAIAs_f:?}  RHS={rTFs_f:?}"
+    );
 
     // Consistency checks
     for i in 0..IMAGE_HEIGHT {
       for j in 0..IMAGE_WIDTH {
-        assert_eq!(edited_f[i][j], edited_f2[i][j], "edited image mismatch at ({i}, {j})");
+        assert_eq!(
+          edited_f[i][j], edited_f2[i][j],
+          "edited image mismatch at ({i}, {j})"
+        );
       }
     }
     assert_eq!(rTAIAs, rTAIAs_f, "Freivalds LHS mismatch");
-    assert_eq!(rTFs,   rTFs_f,   "Freivalds RHS mismatch");
+    assert_eq!(rTFs, rTFs_f, "Freivalds RHS mismatch");
   }
 
   #[test]
   #[ignore]
   fn perf_resize_full_flow_u64() {
     const OUT_HEIGHT: usize = IMAGE_HEIGHT / 2;
-    const OUT_WIDTH:  usize = IMAGE_WIDTH  / 2;
+    const OUT_WIDTH: usize = IMAGE_WIDTH / 2;
 
     let mut rng = rand::thread_rng();
 
@@ -678,10 +773,14 @@ mod tests {
     // r^T * V * image * H * s = r^T * edited * s, where V is OUT_HEIGHT×IMAGE_HEIGHT
     // and H is IMAGE_WIDTH×OUT_WIDTH.
     let image_u64: Vec<Vec<u64>> = (0..IMAGE_HEIGHT)
-      .map(|_| (0..IMAGE_WIDTH).map(|_| rng.next_u32() as u8 as u64).collect())
+      .map(|_| {
+        (0..IMAGE_WIDTH)
+          .map(|_| rng.next_u32() as u8 as u64)
+          .collect()
+      })
       .collect();
     let r: Vec<F> = (0..OUT_HEIGHT).map(|_| gen_rand_scalar::<F>()).collect();
-    let s: Vec<F> = (0..OUT_WIDTH ).map(|_| gen_rand_scalar::<F>()).collect();
+    let s: Vec<F> = (0..OUT_WIDTH).map(|_| gen_rand_scalar::<F>()).collect();
 
     // --- u64-accelerated workflow ---
     let t0 = Instant::now();
@@ -690,27 +789,29 @@ mod tests {
     // resize_v: OUT_HEIGHT × IMAGE_HEIGHT  (left-multiplies image rows)
     // resize_h: IMAGE_WIDTH × OUT_WIDTH    (right-multiplies image cols)
     let resize_v_u64 = create_resizing_matrix_u64(IMAGE_HEIGHT, OUT_HEIGHT, false);
-    let resize_h_u64 = create_resizing_matrix_u64(IMAGE_WIDTH,  OUT_WIDTH,  true);
+    let resize_h_u64 = create_resizing_matrix_u64(IMAGE_WIDTH, OUT_WIDTH, true);
     let row_wise_u64 = matrix_matrix_product_u64(&resize_v_u64, &image_u64); // OUT_HEIGHT × IMAGE_WIDTH
-    let edited_u64   = matrix_matrix_product_u64(&row_wise_u64, &resize_h_u64); // OUT_HEIGHT × OUT_WIDTH
+    let edited_u64 = matrix_matrix_product_u64(&row_wise_u64, &resize_h_u64); // OUT_HEIGHT × OUT_WIDTH
     let elapsed_u64_matmul = t_sub.elapsed();
 
-    let image_f: Vec<Vec<F>> = image_u64.iter()
+    let image_f: Vec<Vec<F>> = image_u64
+      .iter()
       .map(|row| row.iter().map(|&v| F::from(v)).collect())
       .collect();
-    let edited_f: Vec<Vec<F>> = edited_u64.iter()
+    let edited_f: Vec<Vec<F>> = edited_u64
+      .iter()
       .map(|row| row.iter().map(|&v| F::from(v)).collect())
       .collect();
 
     let t_sub = Instant::now();
     let resize_v_f: Vec<Vec<F>> = create_resizing_matrix(IMAGE_HEIGHT, OUT_HEIGHT, false);
-    let resize_h_f: Vec<Vec<F>> = create_resizing_matrix(IMAGE_WIDTH,  OUT_WIDTH,  true);
-    let rTA    = vector_matrix_product(&r, &resize_v_f);    // length IMAGE_HEIGHT
-    let As     = matrix_vector_product(&resize_h_f, &s);    // length IMAGE_WIDTH
-    let rTAI   = vector_matrix_product(&rTA, &image_f);     // length IMAGE_WIDTH
+    let resize_h_f: Vec<Vec<F>> = create_resizing_matrix(IMAGE_WIDTH, OUT_WIDTH, true);
+    let rTA = vector_matrix_product(&r, &resize_v_f); // length IMAGE_HEIGHT
+    let As = matrix_vector_product(&resize_h_f, &s); // length IMAGE_WIDTH
+    let rTAI = vector_matrix_product(&rTA, &image_f); // length IMAGE_WIDTH
     let rTAIAs = inner_product(&rTAI, &As);
-    let rTF    = vector_matrix_product(&r, &edited_f);      // length OUT_WIDTH
-    let rTFs   = inner_product(&rTF, &s);
+    let rTF = vector_matrix_product(&r, &edited_f); // length OUT_WIDTH
+    let rTFs = inner_product(&rTF, &s);
     let elapsed_u64_freivalds = t_sub.elapsed();
 
     let elapsed_u64 = t0.elapsed();
@@ -720,63 +821,75 @@ mod tests {
 
     let t_sub = Instant::now();
     let resize_v_f2: Vec<Vec<F>> = create_resizing_matrix(IMAGE_HEIGHT, OUT_HEIGHT, false);
-    let resize_h_f2: Vec<Vec<F>> = create_resizing_matrix(IMAGE_WIDTH,  OUT_WIDTH,  true);
-    let image_f2: Vec<Vec<F>> = image_u64.iter()
+    let resize_h_f2: Vec<Vec<F>> = create_resizing_matrix(IMAGE_WIDTH, OUT_WIDTH, true);
+    let image_f2: Vec<Vec<F>> = image_u64
+      .iter()
       .map(|row| row.iter().map(|&v| F::from(v)).collect())
       .collect();
     let row_wise_f2 = matrix_matrix_product(&resize_v_f2, &image_f2);
-    let edited_f2   = matrix_matrix_product(&row_wise_f2, &resize_h_f2);
+    let edited_f2 = matrix_matrix_product(&row_wise_f2, &resize_h_f2);
     let elapsed_f_matmul = t_sub.elapsed();
 
     let t_sub = Instant::now();
-    let rTA_f    = vector_matrix_product(&r, &resize_v_f2);
-    let As_f     = matrix_vector_product(&resize_h_f2, &s);
-    let rTAI_f   = vector_matrix_product(&rTA_f, &image_f2);
+    let rTA_f = vector_matrix_product(&r, &resize_v_f2);
+    let As_f = matrix_vector_product(&resize_h_f2, &s);
+    let rTAI_f = vector_matrix_product(&rTA_f, &image_f2);
     let rTAIAs_f = inner_product(&rTAI_f, &As_f);
-    let rTF_f    = vector_matrix_product(&r, &edited_f2);
-    let rTFs_f   = inner_product(&rTF_f, &s);
+    let rTF_f = vector_matrix_product(&r, &edited_f2);
+    let rTFs_f = inner_product(&rTF_f, &s);
     let elapsed_f_freivalds = t_sub.elapsed();
 
     let elapsed_f = t0.elapsed();
 
-    println!("u64-accelerated: {elapsed_u64:?}  (matmul={elapsed_u64_matmul:?}  freivalds={elapsed_u64_freivalds:?})  |  LHS={rTAIAs:?}  RHS={rTFs:?}");
-    println!("pure F:          {elapsed_f:?}  (matmul={elapsed_f_matmul:?}  freivalds={elapsed_f_freivalds:?})  |  LHS={rTAIAs_f:?}  RHS={rTFs_f:?}");
+    println!(
+      "u64-accelerated: {elapsed_u64:?}  (matmul={elapsed_u64_matmul:?}  freivalds={elapsed_u64_freivalds:?})  |  LHS={rTAIAs:?}  RHS={rTFs:?}"
+    );
+    println!(
+      "pure F:          {elapsed_f:?}  (matmul={elapsed_f_matmul:?}  freivalds={elapsed_f_freivalds:?})  |  LHS={rTAIAs_f:?}  RHS={rTFs_f:?}"
+    );
 
     for i in 0..OUT_HEIGHT {
       for j in 0..OUT_WIDTH {
-        assert_eq!(edited_f[i][j], edited_f2[i][j], "edited image mismatch at ({i}, {j})");
+        assert_eq!(
+          edited_f[i][j], edited_f2[i][j],
+          "edited image mismatch at ({i}, {j})"
+        );
       }
     }
     assert_eq!(rTAIAs, rTAIAs_f, "Freivalds LHS mismatch");
-    assert_eq!(rTFs,   rTFs_f,   "Freivalds RHS mismatch");
+    assert_eq!(rTFs, rTFs_f, "Freivalds RHS mismatch");
   }
 
   #[test]
   #[ignore]
   fn perf_resize_sparse_u64() {
     const OUT_HEIGHT: usize = IMAGE_HEIGHT / 2;
-    const OUT_WIDTH:  usize = IMAGE_WIDTH  / 2;
+    const OUT_WIDTH: usize = IMAGE_WIDTH / 2;
 
     let mut rng = rand::thread_rng();
     let image_u64: Vec<Vec<u64>> = (0..IMAGE_HEIGHT)
-      .map(|_| (0..IMAGE_WIDTH).map(|_| rng.next_u32() as u8 as u64).collect())
+      .map(|_| {
+        (0..IMAGE_WIDTH)
+          .map(|_| rng.next_u32() as u8 as u64)
+          .collect()
+      })
       .collect();
 
     // --- Sparse u64 ---
     let t0 = Instant::now();
     let resize_v_sp = create_resizing_sparse(IMAGE_HEIGHT, OUT_HEIGHT, false);
-    let resize_h_sp = create_resizing_sparse(IMAGE_WIDTH,  OUT_WIDTH,  true);
+    let resize_h_sp = create_resizing_sparse(IMAGE_WIDTH, OUT_WIDTH, true);
     let row_wise_sp = sparse_dense_matmul_u64(&resize_v_sp, &image_u64);
-    let edited_sp   = dense_sparse_matmul_u64(&row_wise_sp, &resize_h_sp, OUT_WIDTH);
-    let elapsed_sp  = t0.elapsed();
+    let edited_sp = dense_sparse_matmul_u64(&row_wise_sp, &resize_h_sp, OUT_WIDTH);
+    let elapsed_sp = t0.elapsed();
 
     // --- Dense u64 (baseline) ---
     let t0 = Instant::now();
     let resize_v_d = create_resizing_matrix_u64(IMAGE_HEIGHT, OUT_HEIGHT, false);
-    let resize_h_d = create_resizing_matrix_u64(IMAGE_WIDTH,  OUT_WIDTH,  true);
+    let resize_h_d = create_resizing_matrix_u64(IMAGE_WIDTH, OUT_WIDTH, true);
     let row_wise_d = matrix_matrix_product_u64(&resize_v_d, &image_u64);
-    let edited_d   = matrix_matrix_product_u64(&row_wise_d, &resize_h_d);
-    let elapsed_d  = t0.elapsed();
+    let edited_d = matrix_matrix_product_u64(&row_wise_d, &resize_h_d);
+    let elapsed_d = t0.elapsed();
 
     println!("sparse u64: {elapsed_sp:?}");
     println!("dense  u64: {elapsed_d:?}");
@@ -787,5 +900,4 @@ mod tests {
       }
     }
   }
-
 }

@@ -9,20 +9,20 @@
 // circuits internally.
 
 #![allow(non_snake_case)]
-#[path = "circuits/example_freivalds_edit_circuit.rs"]
-mod example_freivalds_edit_circuit;
 #[path = "circuits/dummy_circuit.rs"]
 mod dummy_circuit;
+#[path = "circuits/example_freivalds_edit_circuit.rs"]
+mod example_freivalds_edit_circuit;
 
 use dummy_circuit::DummyCircuit;
 use example_freivalds_edit_circuit::{ExampleVideoEditCircuit, generate_random_image};
+use rayon::prelude::*;
 use spartan2::{
   bellpepper::{r1cs::SpartanShape, shape_cs::ShapeCS},
   neutronnova_zk_ram_optimized::NeutronNovaZkSNARK,
   provider::T256HyraxEngine,
   traits::Engine,
 };
-use rayon::prelude::*;
 use std::time::Instant;
 use tracing::{info, info_span};
 
@@ -57,11 +57,20 @@ fn main() {
   // Use a dummy circuit of the right shape to derive the R1CS constraints and keys.
   let shape_circuit =
     ExampleVideoEditCircuit::<<E as Engine>::Scalar>::new(generate_random_image(IMAGE_DIMS, 0), 0);
-  let [num_cons_unpadded, num_shared_unpadded, num_precommitted_unpadded, num_rest_unpadded,
-       num_cons, num_shared, num_precommitted, num_rest, num_public, num_challenges] =
-    <ShapeCS<E> as SpartanShape<E>>::r1cs_shape(&shape_circuit)
-      .unwrap()
-      .sizes();
+  let [
+    num_cons_unpadded,
+    num_shared_unpadded,
+    num_precommitted_unpadded,
+    num_rest_unpadded,
+    num_cons,
+    num_shared,
+    num_precommitted,
+    num_rest,
+    num_public,
+    num_challenges,
+  ] = <ShapeCS<E> as SpartanShape<E>>::r1cs_shape(&shape_circuit)
+    .unwrap()
+    .sizes();
   info!(
     num_cons_unpadded,
     num_shared_unpadded,
@@ -87,15 +96,19 @@ fn main() {
   let t0 = Instant::now();
   let step_circuits: Vec<ExampleVideoEditCircuit<<E as Engine>::Scalar>> = (0..NUM_CIRCUITS)
     .into_par_iter()
-    .map(|i| ExampleVideoEditCircuit::<<E as Engine>::Scalar>::new(generate_random_image(IMAGE_DIMS, i as u64), i as u64))
+    .map(|i| {
+      ExampleVideoEditCircuit::<<E as Engine>::Scalar>::new(
+        generate_random_image(IMAGE_DIMS, i as u64),
+        i as u64,
+      )
+    })
     .collect();
   info!(elapsed_ms = t0.elapsed().as_millis(), "generate_witness");
 
   let core_circuit = DummyCircuit::<E>::default();
 
   let t0 = Instant::now();
-  let snark =
-    NeutronNovaZkSNARK::prove(&pk, &step_circuits, &core_circuit, false).unwrap();
+  let snark = NeutronNovaZkSNARK::prove(&pk, &step_circuits, &core_circuit, false).unwrap();
   info!(elapsed_ms = t0.elapsed().as_millis(), "prove");
 
   let t0 = Instant::now();

@@ -13,7 +13,10 @@ use spartan2::traits::{Engine, circuit::SpartanCircuit};
 pub const BYTES_PER_FIELD_ELEMENT: usize = 30;
 pub const BYTES_PER_PIXEL: usize = 3;
 
-pub fn generate_random_vector<Scalar: PrimeField + PrimeFieldBits>(length: usize, seed: u64) -> Vec<Scalar> {
+pub fn generate_random_vector<Scalar: PrimeField + PrimeFieldBits>(
+  length: usize,
+  seed: u64,
+) -> Vec<Scalar> {
   let mut rng = StdRng::seed_from_u64(seed);
   (0..length)
     .map(|_| Scalar::from_u128(rng.gen_range(0..((1u128 << 127) as u128))))
@@ -24,7 +27,17 @@ pub fn generate_random_image(dimensions: (usize, usize), seed: u64) -> Vec<Vec<(
   let (height, width) = dimensions;
   let mut rng = StdRng::seed_from_u64(seed);
   (0..height)
-    .map(|_| (0..width).map(|_| (rng.next_u32() as u8, rng.next_u32() as u8, rng.next_u32() as u8)).collect())
+    .map(|_| {
+      (0..width)
+        .map(|_| {
+          (
+            rng.next_u32() as u8,
+            rng.next_u32() as u8,
+            rng.next_u32() as u8,
+          )
+        })
+        .collect()
+    })
     .collect()
 }
 
@@ -55,7 +68,7 @@ impl<Scalar: PrimeField + PrimeFieldBits> GrayscaleCircuit<Scalar> {
     // The randomness generation feature in Spartan2 was kind of broken at the time of writing.
     // generating challenges like this for now, this has the same performance profile, but would need to be fixed.
     let base = (1u64 << 32) + 5 * index;
-    let input_polynomial_interpolation_challenge  = generate_random_vector(1, base + 1).remove(0);
+    let input_polynomial_interpolation_challenge = generate_random_vector(1, base + 1).remove(0);
     let logup_challenge_1 = generate_random_vector(1, base + 2).remove(0);
     let logup_challenge_2 = generate_random_vector(1, base + 3).remove(0);
     let logup_challenge_3 = generate_random_vector(1, base + 4).remove(0);
@@ -84,11 +97,15 @@ impl<Scalar: PrimeField + PrimeFieldBits> GrayscaleCircuit<Scalar> {
         acc * input_polynomial_interpolation_challenge + s
       });
 
-    let edited_image: Vec<Vec<u8>> = image.iter().map(|row| {
-      row.iter().map(|&(r, g, b)| {
-        ((r as u32 * 299 + g as u32 * 587 + b as u32 * 114) / 1000) as u8
-      }).collect()
-    }).collect();
+    let edited_image: Vec<Vec<u8>> = image
+      .iter()
+      .map(|row| {
+        row
+          .iter()
+          .map(|&(r, g, b)| ((r as u32 * 299 + g as u32 * 587 + b as u32 * 114) / 1000) as u8)
+          .collect()
+      })
+      .collect();
 
     // Evaluate the output image output interpolation. Note: this is a bit of a hack,
     // it turns out that having large public outputs leads to some bottlenecks
@@ -240,10 +257,12 @@ impl<E: Engine> SpartanCircuit<E> for GrayscaleCircuit<E::Scalar> {
     const GRAYSCALE_B_COEFFICIENT: u32 = 114;
 
     // Plain weighted sums (numerator of fixed-point grayscale, divide by 1000 to get the pixel value).
-    let grayscale_weighted_sums: Vec<Vec<u32>> = self.image
+    let grayscale_weighted_sums: Vec<Vec<u32>> = self
+      .image
       .iter()
       .map(|row| {
-        row.iter()
+        row
+          .iter()
           .map(|&(r, g, b)| {
             r as u32 * GRAYSCALE_R_COEFFICIENT
               + g as u32 * GRAYSCALE_G_COEFFICIENT
@@ -279,12 +298,22 @@ impl<E: Engine> SpartanCircuit<E> for GrayscaleCircuit<E::Scalar> {
     let grayscale_weighted_lcs: Vec<Vec<LinearCombination<E::Scalar>>> = image_input_vars
       .iter()
       .map(|row| {
-        row.iter()
+        row
+          .iter()
           .map(|(n0, n1, n2)| {
             LinearCombination::zero()
-              + (E::Scalar::from(GRAYSCALE_R_COEFFICIENT as u64), n0.get_variable())
-              + (E::Scalar::from(GRAYSCALE_G_COEFFICIENT as u64), n1.get_variable())
-              + (E::Scalar::from(GRAYSCALE_B_COEFFICIENT as u64), n2.get_variable())
+              + (
+                E::Scalar::from(GRAYSCALE_R_COEFFICIENT as u64),
+                n0.get_variable(),
+              )
+              + (
+                E::Scalar::from(GRAYSCALE_G_COEFFICIENT as u64),
+                n1.get_variable(),
+              )
+              + (
+                E::Scalar::from(GRAYSCALE_B_COEFFICIENT as u64),
+                n2.get_variable(),
+              )
           })
           .collect()
       })
@@ -300,35 +329,35 @@ impl<E: Engine> SpartanCircuit<E> for GrayscaleCircuit<E::Scalar> {
     let mut logup_prev_1: Option<AllocatedNum<E::Scalar>> = None;
     let mut logup_running_sum_1 = E::Scalar::ZERO;
     for (i, row) in allocated_grayscale_remainders.iter().enumerate() {
-        for (j, remainder) in row.iter().enumerate() {
-            let remainder_val = grayscale_remainders[i][j];
-            logup_multiplicities_1[remainder_val as usize] += 1;
-            let denom_val = self.logup_challenge_1 + E::Scalar::from_u128(remainder_val as u128);
-            logup_running_sum_1 = logup_running_sum_1 + denom_val.invert().unwrap_or(E::Scalar::ZERO);
+      for (j, remainder) in row.iter().enumerate() {
+        let remainder_val = grayscale_remainders[i][j];
+        logup_multiplicities_1[remainder_val as usize] += 1;
+        let denom_val = self.logup_challenge_1 + E::Scalar::from_u128(remainder_val as u128);
+        logup_running_sum_1 = logup_running_sum_1 + denom_val.invert().unwrap_or(E::Scalar::ZERO);
 
-            let partial_sum_var = AllocatedNum::alloc(
-            cs.namespace(|| format!("LogUp remainder check partial sum {i} {j}")),
-            || Ok(logup_running_sum_1),
-            )?;
+        let partial_sum_var = AllocatedNum::alloc(
+          cs.namespace(|| format!("LogUp remainder check partial sum {i} {j}")),
+          || Ok(logup_running_sum_1),
+        )?;
 
-            if let Some(prev) = &logup_prev_1 {
-            cs.enforce(
-                || format!("LogUp remainder check partial sum constraint {i} {j}"),
-                |lc| lc + partial_sum_var.get_variable() - prev.get_variable(),
-                |lc| lc + allocated_logup_challenge_1.get_variable() + remainder.get_variable(),
-                |lc| lc + CS::one(),
-            );
-            } else {
-            cs.enforce(
-                || format!("LogUp remainder check partial sum constraint {i} {j}"),
-                |lc| lc + partial_sum_var.get_variable(),
-                |lc| lc + allocated_logup_challenge_1.get_variable() + remainder.get_variable(),
-                |lc| lc + CS::one(),
-            );
-            }
-
-            logup_prev_1 = Some(partial_sum_var);
+        if let Some(prev) = &logup_prev_1 {
+          cs.enforce(
+            || format!("LogUp remainder check partial sum constraint {i} {j}"),
+            |lc| lc + partial_sum_var.get_variable() - prev.get_variable(),
+            |lc| lc + allocated_logup_challenge_1.get_variable() + remainder.get_variable(),
+            |lc| lc + CS::one(),
+          );
+        } else {
+          cs.enforce(
+            || format!("LogUp remainder check partial sum constraint {i} {j}"),
+            |lc| lc + partial_sum_var.get_variable(),
+            |lc| lc + allocated_logup_challenge_1.get_variable() + remainder.get_variable(),
+            |lc| lc + CS::one(),
+          );
         }
+
+        logup_prev_1 = Some(partial_sum_var);
+      }
     }
     let lhs_logup_sum_1 = logup_prev_1.unwrap();
 
@@ -354,14 +383,18 @@ impl<E: Engine> SpartanCircuit<E> for GrayscaleCircuit<E::Scalar> {
         cs.enforce(
           || format!("RHS Remainder LogUp partial sum constraint {b}"),
           |lc| lc + partial_sum_var.get_variable() - prev.get_variable(),
-          |lc| lc + allocated_logup_challenge_1.get_variable() + (E::Scalar::from_u128(b), CS::one()),
+          |lc| {
+            lc + allocated_logup_challenge_1.get_variable() + (E::Scalar::from_u128(b), CS::one())
+          },
           |lc| lc + mult_var.get_variable(),
         );
       } else {
         cs.enforce(
           || format!("RHS Remainder LogUp partial sum constraint {b}"),
           |lc| lc + partial_sum_var.get_variable(),
-          |lc| lc + allocated_logup_challenge_1.get_variable() + (E::Scalar::from_u128(b), CS::one()),
+          |lc| {
+            lc + allocated_logup_challenge_1.get_variable() + (E::Scalar::from_u128(b), CS::one())
+          },
           |lc| lc + mult_var.get_variable(),
         );
       }
@@ -388,67 +421,73 @@ impl<E: Engine> SpartanCircuit<E> for GrayscaleCircuit<E::Scalar> {
     let mut logup_prev_2: Option<AllocatedNum<E::Scalar>> = None;
     let mut logup_running_sum_2 = E::Scalar::ZERO;
     for (i, row) in image_input_vars.iter().enumerate() {
-        for (j, (n0, n1, n2)) in row.iter().enumerate() {
-            let (val0, val1, val2) = self.image[i][j];
-            for (c, (channel_val, channel_var)) in [(val0, n0), (val1, n1), (val2, n2)].into_iter().enumerate() {
-                logup_multiplicities_2[channel_val as usize] += 1;
-                let denom_val = self.logup_challenge_2 + E::Scalar::from_u128(channel_val as u128);
-                logup_running_sum_2 = logup_running_sum_2 + denom_val.invert().unwrap_or(E::Scalar::ZERO);
+      for (j, (n0, n1, n2)) in row.iter().enumerate() {
+        let (val0, val1, val2) = self.image[i][j];
+        for (c, (channel_val, channel_var)) in
+          [(val0, n0), (val1, n1), (val2, n2)].into_iter().enumerate()
+        {
+          logup_multiplicities_2[channel_val as usize] += 1;
+          let denom_val = self.logup_challenge_2 + E::Scalar::from_u128(channel_val as u128);
+          logup_running_sum_2 = logup_running_sum_2 + denom_val.invert().unwrap_or(E::Scalar::ZERO);
 
-                let partial_sum_var = AllocatedNum::alloc(
-                cs.namespace(|| format!("Byte Check LogUp partial sum {i} {j} {c}")),
-                || Ok(logup_running_sum_2),
-                )?;
-
-                if let Some(prev) = &logup_prev_2 {
-                cs.enforce(
-                    || format!("Byte Check LogUp partial sum constraint {i} {j} {c}"),
-                    |lc| lc + partial_sum_var.get_variable() - prev.get_variable(),
-                    |lc| lc + allocated_logup_challenge_2.get_variable() + channel_var.get_variable(),
-                    |lc| lc + CS::one(),
-                );
-                } else {
-                cs.enforce(
-                    || format!("Byte Check LogUp partial sum constraint {i} {j} {c}"),
-                    |lc| lc + partial_sum_var.get_variable(),
-                    |lc| lc + allocated_logup_challenge_2.get_variable() + channel_var.get_variable(),
-                    |lc| lc + CS::one(),
-                );
-                }
-
-                logup_prev_2 = Some(partial_sum_var);
-            }
-        }
-    }
-    for (i, (alloc_row, val_row)) in allocated_edited_image.iter().zip(self.edited_image.iter()).enumerate() {
-        for (j, (pixel_var, &pixel_val)) in alloc_row.iter().zip(val_row.iter()).enumerate() {
-            logup_multiplicities_2[pixel_val as usize] += 1;
-            let denom_val = self.logup_challenge_2 + E::Scalar::from_u128(pixel_val as u128);
-            logup_running_sum_2 = logup_running_sum_2 + denom_val.invert().unwrap_or(E::Scalar::ZERO);
-
-            let partial_sum_var = AllocatedNum::alloc(
-            cs.namespace(|| format!("Byte Check LogUp partial sum {i} {j} edited")),
+          let partial_sum_var = AllocatedNum::alloc(
+            cs.namespace(|| format!("Byte Check LogUp partial sum {i} {j} {c}")),
             || Ok(logup_running_sum_2),
-            )?;
+          )?;
 
-            if let Some(prev) = &logup_prev_2 {
+          if let Some(prev) = &logup_prev_2 {
             cs.enforce(
-                || format!("Byte Check LogUp partial sum constraint {i} {j} edited"),
-                |lc| lc + partial_sum_var.get_variable() - prev.get_variable(),
-                |lc| lc + allocated_logup_challenge_2.get_variable() + pixel_var.get_variable(),
-                |lc| lc + CS::one(),
+              || format!("Byte Check LogUp partial sum constraint {i} {j} {c}"),
+              |lc| lc + partial_sum_var.get_variable() - prev.get_variable(),
+              |lc| lc + allocated_logup_challenge_2.get_variable() + channel_var.get_variable(),
+              |lc| lc + CS::one(),
             );
-            } else {
+          } else {
             cs.enforce(
-                || format!("Byte Check LogUp partial sum constraint {i} {j} edited"),
-                |lc| lc + partial_sum_var.get_variable(),
-                |lc| lc + allocated_logup_challenge_2.get_variable() + pixel_var.get_variable(),
-                |lc| lc + CS::one(),
+              || format!("Byte Check LogUp partial sum constraint {i} {j} {c}"),
+              |lc| lc + partial_sum_var.get_variable(),
+              |lc| lc + allocated_logup_challenge_2.get_variable() + channel_var.get_variable(),
+              |lc| lc + CS::one(),
             );
-            }
+          }
 
-            logup_prev_2 = Some(partial_sum_var);
+          logup_prev_2 = Some(partial_sum_var);
         }
+      }
+    }
+    for (i, (alloc_row, val_row)) in allocated_edited_image
+      .iter()
+      .zip(self.edited_image.iter())
+      .enumerate()
+    {
+      for (j, (pixel_var, &pixel_val)) in alloc_row.iter().zip(val_row.iter()).enumerate() {
+        logup_multiplicities_2[pixel_val as usize] += 1;
+        let denom_val = self.logup_challenge_2 + E::Scalar::from_u128(pixel_val as u128);
+        logup_running_sum_2 = logup_running_sum_2 + denom_val.invert().unwrap_or(E::Scalar::ZERO);
+
+        let partial_sum_var = AllocatedNum::alloc(
+          cs.namespace(|| format!("Byte Check LogUp partial sum {i} {j} edited")),
+          || Ok(logup_running_sum_2),
+        )?;
+
+        if let Some(prev) = &logup_prev_2 {
+          cs.enforce(
+            || format!("Byte Check LogUp partial sum constraint {i} {j} edited"),
+            |lc| lc + partial_sum_var.get_variable() - prev.get_variable(),
+            |lc| lc + allocated_logup_challenge_2.get_variable() + pixel_var.get_variable(),
+            |lc| lc + CS::one(),
+          );
+        } else {
+          cs.enforce(
+            || format!("Byte Check LogUp partial sum constraint {i} {j} edited"),
+            |lc| lc + partial_sum_var.get_variable(),
+            |lc| lc + allocated_logup_challenge_2.get_variable() + pixel_var.get_variable(),
+            |lc| lc + CS::one(),
+          );
+        }
+
+        logup_prev_2 = Some(partial_sum_var);
+      }
     }
     let lhs_logup_sum_2 = logup_prev_2.unwrap();
 
@@ -474,14 +513,18 @@ impl<E: Engine> SpartanCircuit<E> for GrayscaleCircuit<E::Scalar> {
         cs.enforce(
           || format!("RHS Byte Check LogUp partial sum constraint {b}"),
           |lc| lc + partial_sum_var.get_variable() - prev.get_variable(),
-          |lc| lc + allocated_logup_challenge_2.get_variable() + (E::Scalar::from_u128(b), CS::one()),
+          |lc| {
+            lc + allocated_logup_challenge_2.get_variable() + (E::Scalar::from_u128(b), CS::one())
+          },
           |lc| lc + mult_var.get_variable(),
         );
       } else {
         cs.enforce(
           || format!("RHS Byte Check LogUp partial sum constraint {b}"),
           |lc| lc + partial_sum_var.get_variable(),
-          |lc| lc + allocated_logup_challenge_2.get_variable() + (E::Scalar::from_u128(b), CS::one()),
+          |lc| {
+            lc + allocated_logup_challenge_2.get_variable() + (E::Scalar::from_u128(b), CS::one())
+          },
           |lc| lc + mult_var.get_variable(),
         );
       }
@@ -504,8 +547,12 @@ impl<E: Engine> SpartanCircuit<E> for GrayscaleCircuit<E::Scalar> {
           || format!("Grayscale division check {i} {j}"),
           |lc| lc + CS::one(),
           |lc| lc + &grayscale_weighted_lcs[i][j],
-          |lc| lc + (E::Scalar::from(1000u64), allocated_target_image[i][j].get_variable())
-                   + remainder.get_variable(),
+          |lc| {
+            lc + (
+              E::Scalar::from(1000u64),
+              allocated_target_image[i][j].get_variable(),
+            ) + remainder.get_variable()
+          },
         );
       }
     }
@@ -555,11 +602,13 @@ impl<E: Engine> SpartanCircuit<E> for GrayscaleCircuit<E::Scalar> {
 
     for (k, (lc, scalar)) in packed_lcs.iter().zip(packed_scalars.iter()).enumerate() {
       if let Some(prev) = &input_poly_eval_prev {
-        input_poly_eval_scalar = input_poly_eval_scalar * self.input_polynomial_interpolation_challenge + scalar;
+        input_poly_eval_scalar =
+          input_poly_eval_scalar * self.input_polynomial_interpolation_challenge + scalar;
 
-        let input_eval_var = AllocatedNum::alloc(cs.namespace(|| format!("input poly eval {k}")), || {
-          Ok(input_poly_eval_scalar)
-        })?;
+        let input_eval_var =
+          AllocatedNum::alloc(cs.namespace(|| format!("input poly eval {k}")), || {
+            Ok(input_poly_eval_scalar)
+          })?;
 
         cs.enforce(
           || format!("input poly eval constraint {k}"),
@@ -572,9 +621,10 @@ impl<E: Engine> SpartanCircuit<E> for GrayscaleCircuit<E::Scalar> {
       } else {
         input_poly_eval_scalar = *scalar;
 
-        let input_eval_var = AllocatedNum::alloc(cs.namespace(|| format!("input poly eval {k}")), || {
-          Ok(input_poly_eval_scalar)
-        })?;
+        let input_eval_var =
+          AllocatedNum::alloc(cs.namespace(|| format!("input poly eval {k}")), || {
+            Ok(input_poly_eval_scalar)
+          })?;
 
         cs.enforce(
           || format!("input poly eval constraint {k}"),
@@ -587,10 +637,10 @@ impl<E: Engine> SpartanCircuit<E> for GrayscaleCircuit<E::Scalar> {
       }
     }
     let input_poly_eval = input_poly_eval_prev.unwrap();
-    let public_input_poly_eval = AllocatedNum::alloc_input(
-      cs.namespace(|| "public_input_poly_eval"),
-      || Ok(self.public_input_poly_eval),
-    )?;
+    let public_input_poly_eval =
+      AllocatedNum::alloc_input(cs.namespace(|| "public_input_poly_eval"), || {
+        Ok(self.public_input_poly_eval)
+      })?;
     cs.enforce(
       || "public_input_poly_eval equality",
       |lc| lc + CS::one(),
@@ -633,13 +683,19 @@ impl<E: Engine> SpartanCircuit<E> for GrayscaleCircuit<E::Scalar> {
     let mut output_poly_eval_prev: Option<AllocatedNum<E::Scalar>> = None;
     let mut output_poly_eval_scalar = E::Scalar::ZERO;
 
-    for (k, (lc, scalar)) in output_packed_lcs.iter().zip(output_packed_scalars.iter()).enumerate() {
+    for (k, (lc, scalar)) in output_packed_lcs
+      .iter()
+      .zip(output_packed_scalars.iter())
+      .enumerate()
+    {
       if let Some(prev) = &output_poly_eval_prev {
-        output_poly_eval_scalar = output_poly_eval_scalar * self.output_polynomial_interpolation_challenge + scalar;
+        output_poly_eval_scalar =
+          output_poly_eval_scalar * self.output_polynomial_interpolation_challenge + scalar;
 
-        let output_eval_var = AllocatedNum::alloc(cs.namespace(|| format!("output poly eval {k}")), || {
-          Ok(output_poly_eval_scalar)
-        })?;
+        let output_eval_var =
+          AllocatedNum::alloc(cs.namespace(|| format!("output poly eval {k}")), || {
+            Ok(output_poly_eval_scalar)
+          })?;
 
         cs.enforce(
           || format!("output poly eval constraint {k}"),
@@ -652,9 +708,10 @@ impl<E: Engine> SpartanCircuit<E> for GrayscaleCircuit<E::Scalar> {
       } else {
         output_poly_eval_scalar = *scalar;
 
-        let output_eval_var = AllocatedNum::alloc(cs.namespace(|| format!("output poly eval {k}")), || {
-          Ok(output_poly_eval_scalar)
-        })?;
+        let output_eval_var =
+          AllocatedNum::alloc(cs.namespace(|| format!("output poly eval {k}")), || {
+            Ok(output_poly_eval_scalar)
+          })?;
 
         cs.enforce(
           || format!("output poly eval constraint {k}"),
@@ -667,10 +724,10 @@ impl<E: Engine> SpartanCircuit<E> for GrayscaleCircuit<E::Scalar> {
       }
     }
     let output_poly_eval = output_poly_eval_prev.unwrap();
-    let public_output_poly_eval = AllocatedNum::alloc_input(
-      cs.namespace(|| "public_output_poly_eval"),
-      || Ok(self.public_output_poly_eval),
-    )?;
+    let public_output_poly_eval =
+      AllocatedNum::alloc_input(cs.namespace(|| "public_output_poly_eval"), || {
+        Ok(self.public_output_poly_eval)
+      })?;
     cs.enforce(
       || "public_output_poly_eval equality",
       |lc| lc + CS::one(),
@@ -683,16 +740,16 @@ impl<E: Engine> SpartanCircuit<E> for GrayscaleCircuit<E::Scalar> {
     for (i, row) in self.jnd_map.iter().enumerate() {
       let mut row_vars = Vec::new();
       for (j, &val) in row.iter().enumerate() {
-        let n = AllocatedNum::alloc(
-          cs.namespace(|| format!("jnd map entry {i} {j}")),
-          || Ok(E::Scalar::from_u128(val as u128)),
-        )?;
+        let n = AllocatedNum::alloc(cs.namespace(|| format!("jnd map entry {i} {j}")), || {
+          Ok(E::Scalar::from_u128(val as u128))
+        })?;
         row_vars.push(n);
       }
       jnd_map_variables.push(row_vars);
     }
 
-    let jnd_differences: Vec<Vec<i16>> = self.edited_image
+    let jnd_differences: Vec<Vec<i16>> = self
+      .edited_image
       .iter()
       .zip(self.target_image.iter())
       .zip(self.jnd_map.iter())
@@ -716,9 +773,7 @@ impl<E: Engine> SpartanCircuit<E> for GrayscaleCircuit<E::Scalar> {
           .zip(target_row.iter())
           .zip(jnd_row.iter())
           .map(|((e, t), jnd)| {
-            LinearCombination::zero()
-              + e.get_variable()
-              - t.get_variable()
+            LinearCombination::zero() + e.get_variable() - t.get_variable()
               + (E::Scalar::from(2u64), jnd.get_variable())
           })
           .collect()
@@ -733,37 +788,41 @@ impl<E: Engine> SpartanCircuit<E> for GrayscaleCircuit<E::Scalar> {
 
     let mut logup_prev_3: Option<AllocatedNum<E::Scalar>> = None;
     let mut logup_running_sum_3 = E::Scalar::ZERO;
-    for (i, (diff_row, lc_row)) in jnd_differences.iter().zip(jnd_differences_lc.iter()).enumerate() {
-        for (j, (&diff_val, _)) in diff_row.iter().zip(lc_row.iter()).enumerate() {
-            // NOTE: diff_val is i16 and may be negative; the usize cast and from_u128 are only
-            // correct if the JND invariant guarantees diff_val >= 0 at this point.
-            logup_multiplicities_3[diff_val as usize] += 1;
-            let denom_val = self.logup_challenge_3 + E::Scalar::from_u128(diff_val as u128);
-            logup_running_sum_3 = logup_running_sum_3 + denom_val.invert().unwrap_or(E::Scalar::ZERO);
+    for (i, (diff_row, lc_row)) in jnd_differences
+      .iter()
+      .zip(jnd_differences_lc.iter())
+      .enumerate()
+    {
+      for (j, (&diff_val, _)) in diff_row.iter().zip(lc_row.iter()).enumerate() {
+        // NOTE: diff_val is i16 and may be negative; the usize cast and from_u128 are only
+        // correct if the JND invariant guarantees diff_val >= 0 at this point.
+        logup_multiplicities_3[diff_val as usize] += 1;
+        let denom_val = self.logup_challenge_3 + E::Scalar::from_u128(diff_val as u128);
+        logup_running_sum_3 = logup_running_sum_3 + denom_val.invert().unwrap_or(E::Scalar::ZERO);
 
-            let partial_sum_var = AllocatedNum::alloc(
-            cs.namespace(|| format!("LogUp JND map difference check partial sum {i} {j}")),
-            || Ok(logup_running_sum_3),
-            )?;
+        let partial_sum_var = AllocatedNum::alloc(
+          cs.namespace(|| format!("LogUp JND map difference check partial sum {i} {j}")),
+          || Ok(logup_running_sum_3),
+        )?;
 
-            if let Some(prev) = &logup_prev_3 {
-            cs.enforce(
-                || format!("LogUp JND map difference check partial sum constraint {i} {j}"),
-                |lc| lc + partial_sum_var.get_variable() - prev.get_variable(),
-                |lc| lc + allocated_logup_challenge_3.get_variable() + &jnd_differences_lc[i][j],
-                |lc| lc + CS::one(),
-            );
-            } else {
-            cs.enforce(
-                || format!("LogUp JND map difference check partial sum constraint {i} {j}"),
-                |lc| lc + partial_sum_var.get_variable(),
-                |lc| lc + allocated_logup_challenge_3.get_variable() + &jnd_differences_lc[i][j],
-                |lc| lc + CS::one(),
-            );
-            }
-
-            logup_prev_3 = Some(partial_sum_var);
+        if let Some(prev) = &logup_prev_3 {
+          cs.enforce(
+            || format!("LogUp JND map difference check partial sum constraint {i} {j}"),
+            |lc| lc + partial_sum_var.get_variable() - prev.get_variable(),
+            |lc| lc + allocated_logup_challenge_3.get_variable() + &jnd_differences_lc[i][j],
+            |lc| lc + CS::one(),
+          );
+        } else {
+          cs.enforce(
+            || format!("LogUp JND map difference check partial sum constraint {i} {j}"),
+            |lc| lc + partial_sum_var.get_variable(),
+            |lc| lc + allocated_logup_challenge_3.get_variable() + &jnd_differences_lc[i][j],
+            |lc| lc + CS::one(),
+          );
         }
+
+        logup_prev_3 = Some(partial_sum_var);
+      }
     }
     let lhs_logup_sum_3 = logup_prev_3.unwrap();
 
@@ -789,14 +848,18 @@ impl<E: Engine> SpartanCircuit<E> for GrayscaleCircuit<E::Scalar> {
         cs.enforce(
           || format!("RHS JND map difference check LogUp partial sum constraint {b}"),
           |lc| lc + partial_sum_var.get_variable() - prev.get_variable(),
-          |lc| lc + allocated_logup_challenge_3.get_variable() + (E::Scalar::from_u128(b), CS::one()),
+          |lc| {
+            lc + allocated_logup_challenge_3.get_variable() + (E::Scalar::from_u128(b), CS::one())
+          },
           |lc| lc + mult_var.get_variable(),
         );
       } else {
         cs.enforce(
           || format!("RHS JND map difference check LogUp partial sum constraint {b}"),
           |lc| lc + partial_sum_var.get_variable(),
-          |lc| lc + allocated_logup_challenge_3.get_variable() + (E::Scalar::from_u128(b), CS::one()),
+          |lc| {
+            lc + allocated_logup_challenge_3.get_variable() + (E::Scalar::from_u128(b), CS::one())
+          },
           |lc| lc + mult_var.get_variable(),
         );
       }

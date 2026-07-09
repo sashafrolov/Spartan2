@@ -4,12 +4,13 @@
 //   RUST_LOG=neutron_nova_resizing=info,spartan2::neutronnova_zk_ram_optimized=info RUSTFLAGS="-C target-cpu=native" cargo run --example neutron_nova_resizing --release
 
 #![allow(non_snake_case)]
-#[path = "circuits/resizing_circuit.rs"]
-mod resizing_circuit;
 #[path = "circuits/dummy_circuit.rs"]
 mod dummy_circuit;
+#[path = "circuits/resizing_circuit.rs"]
+mod resizing_circuit;
 
 use dummy_circuit::DummyCircuit;
+use rayon::prelude::*;
 use resizing_circuit::ResizingCircuit;
 use spartan2::{
   bellpepper::{r1cs::SpartanShape, shape_cs::ShapeCS},
@@ -17,9 +18,7 @@ use spartan2::{
   provider::T256HyraxEngine,
   traits::Engine,
 };
-use rayon::prelude::*;
-use std::time::Instant;
-use std::env;
+use std::{env, time::Instant};
 use tracing::{info, info_span};
 
 const CHANNELS: [&str; 3] = ["R", "G", "B"];
@@ -56,13 +55,21 @@ fn main() {
   );
 
   // Use a dummy circuit of the right shape to derive the R1CS constraints and keys.
-  let shape_circuit =
-    ResizingCircuit::<<E as Engine>::Scalar>::new(&channel_path_format, "R", 1);
-  let [num_cons_unpadded, num_shared_unpadded, num_precommitted_unpadded, num_rest_unpadded,
-       num_cons, num_shared, num_precommitted, num_rest, num_public, num_challenges] =
-    <ShapeCS<E> as SpartanShape<E>>::r1cs_shape(&shape_circuit)
-      .unwrap()
-      .sizes();
+  let shape_circuit = ResizingCircuit::<<E as Engine>::Scalar>::new(&channel_path_format, "R", 1);
+  let [
+    num_cons_unpadded,
+    num_shared_unpadded,
+    num_precommitted_unpadded,
+    num_rest_unpadded,
+    num_cons,
+    num_shared,
+    num_precommitted,
+    num_rest,
+    num_public,
+    num_challenges,
+  ] = <ShapeCS<E> as SpartanShape<E>>::r1cs_shape(&shape_circuit)
+    .unwrap()
+    .sizes();
   info!(
     num_cons_unpadded,
     num_shared_unpadded,
@@ -105,8 +112,7 @@ fn main() {
   let core_circuit = DummyCircuit::<E>::default();
 
   let t0 = Instant::now();
-  let snark =
-    NeutronNovaZkSNARK::prove(&pk, &step_circuits, &core_circuit, false).unwrap();
+  let snark = NeutronNovaZkSNARK::prove(&pk, &step_circuits, &core_circuit, false).unwrap();
   info!(elapsed_ms = t0.elapsed().as_millis(), "prove");
 
   let t0 = Instant::now();

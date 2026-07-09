@@ -6,26 +6,15 @@
 
 //! This implements a "Read/Write Streaming" version of the proof system in neutronnova_zk_streaming.rs.
 //! For ease of implementation (and because there were some bugs in the implementation at time of writing),
-//! this doesn't implement the "small value sumcheck" optimizations. 
-use scribe_streams::{
-  iterator::{BatchedIterator, from_iter},
-  file_vec::FileVec,
-  serialize::{DeserializeRaw, SerializeRaw},
-};
-use crate::start_span;
+//! this doesn't implement the "small value sumcheck" optimizations.
 use crate::{
   Commitment, CommitmentKey, VerifierKey,
   bellpepper::{
-    r1cs::{
-      MultiRoundSpartanShape, MultiRoundSpartanWitness, SpartanShape,
-      SpartanWitness,
-    },
+    r1cs::{MultiRoundSpartanShape, MultiRoundSpartanWitness, SpartanShape, SpartanWitness},
     shape_cs::ShapeCS,
     solver::SatisfyingAssignment,
   },
-  big_num::{
-    DelayedReduction,
-  },
+  big_num::DelayedReduction,
   digest::DigestComputer,
   errors::SpartanError,
   math::Math,
@@ -40,6 +29,7 @@ use crate::{
     R1CSInstance, R1CSShape, R1CSWitness, RelaxedR1CSInstance, SplitMultiRoundR1CSInstance,
     SplitMultiRoundR1CSShape, SplitR1CSInstance, SplitR1CSShape, weights_from_r,
   },
+  start_span,
   sumcheck::SumcheckProof,
   traits::{
     Engine, Group,
@@ -53,6 +43,11 @@ use crate::{
 use ff::Field;
 use once_cell::sync::OnceCell;
 use rayon::prelude::*;
+use scribe_streams::{
+  file_vec::FileVec,
+  iterator::{BatchedIterator, from_iter},
+  serialize::{DeserializeRaw, SerializeRaw},
+};
 use sha3::{Digest, Keccak256};
 
 /// Pre-computed keccak hash. Used to parallelize the work of hashing polynomial commitments
@@ -211,8 +206,7 @@ where
   fn compact_folded_layers_z(
     z: &mut [scribe_streams::file_vec::FileVec<E::Scalar>],
     prove_pairs: usize,
-  )
-  where
+  ) where
     E::Scalar: SerializeRaw + DeserializeRaw,
   {
     for j in 0..prove_pairs {
@@ -393,7 +387,12 @@ where
       let pad = n_padded - n;
       let first_hash = instance_hashes[0];
       let (new_zs, ()) = rayon::join(
-        || (0..pad).into_par_iter().map(|_| Zs[0].deep_copy()).collect::<Vec<_>>(),
+        || {
+          (0..pad)
+            .into_par_iter()
+            .map(|_| Zs[0].deep_copy())
+            .collect::<Vec<_>>()
+        },
         || {
           Us.extend(vec![Us[0].clone(); pad]);
           Ws_r_W.extend(vec![Ws_r_W[0].clone(); pad]);
@@ -476,19 +475,11 @@ where
           let (a0, b0, c0) = S.multiply_vec(&z0).unwrap();
 
           let z1 = pair_z[1].iter().to_vec();
-          let (a1, b1) = S.multiply_vec_no_cz(&z1).unwrap();          
+          let (a1, b1) = S.multiply_vec_no_cz(&z1).unwrap();
 
           // In progress. Don't worry about build.
-          let (e0, quad_coeff) = Self::prove_helper_mem(
-            0,
-            (left, right),
-            &E_eq,
-            &a0,
-            &b0,
-            &c0,
-            &a1,
-            &b1,
-          );
+          let (e0, quad_coeff) =
+            Self::prove_helper_mem(0, (left, right), &E_eq, &a0, &b0, &c0, &a1, &b1);
           let w = suffix_weight_full::<E::Scalar>(0, ell_b, pair_idx, &rhos);
           (e0 * w, quad_coeff * w)
         })
@@ -543,9 +534,10 @@ where
             .map(|(j, pair_z)| {
               let (lo, hi) = pair_z.split_at_mut(1);
               let (folded_z0, folded_z_fv0) = FileVec::vec_file_vec_from_batched_iter_with_prefix(
-                lo[0].iter().zip(hi[0].iter()).map(|(l, h)| {
-                  l + prev_r_b * (h - l)
-                }),
+                lo[0]
+                  .iter()
+                  .zip(hi[0].iter())
+                  .map(|(l, h)| l + prev_r_b * (h - l)),
                 "folded_z",
               );
               pair_z[0] = folded_z_fv0;
@@ -553,24 +545,17 @@ where
 
               let (lo, hi) = pair_z.split_at_mut(3);
               let (folded_z2, folded_z_fv2) = FileVec::vec_file_vec_from_batched_iter_with_prefix(
-                lo[2].iter().zip(hi[0].iter()).map(|(l, h)| {
-                  l + prev_r_b * (h - l)
-                }),
+                lo[2]
+                  .iter()
+                  .zip(hi[0].iter())
+                  .map(|(l, h)| l + prev_r_b * (h - l)),
                 "folded_z",
               );
               pair_z[2] = folded_z_fv2;
               let (a2, b2) = S.multiply_vec_no_cz(&folded_z2).unwrap();
 
-              let (e0, qc) = Self::prove_helper_mem(
-                t,
-                (left, right),
-                e_eq_ref,
-                &a0,
-                &b0,
-                &c0,
-                &a2,
-                &b2,
-              );
+              let (e0, qc) =
+                Self::prove_helper_mem(t, (left, right), e_eq_ref, &a0, &b0, &c0, &a2, &b2);
               let w = suffix_weight_full::<E::Scalar>(t, ell_b, j, rhos_ref);
               (e0 * w, qc * w)
             })
@@ -583,7 +568,11 @@ where
 
           Self::compact_folded_layers_z(&mut Zs, prove_pairs);
 
-          assert_eq!(2 * prove_pairs, fold_pairs, "fold_pairs must be a power of 2");
+          assert_eq!(
+            2 * prove_pairs,
+            fold_pairs,
+            "fold_pairs must be a power of 2"
+          );
         }
 
         Zs.truncate(fold_pairs);
@@ -602,7 +591,7 @@ where
         A_layers_mem = vec![Vec::new(); fold_pairs];
         B_layers_mem = vec![Vec::new(); fold_pairs];
         C_layers_mem = vec![Vec::new(); fold_pairs];
-        Z_layers_mem = vec![Vec::new(); fold_pairs];    
+        Z_layers_mem = vec![Vec::new(); fold_pairs];
 
         {
           let e_eq_ref = &E_eq;
@@ -612,33 +601,51 @@ where
 
           // Fold each group of 4 FileVecs into 2 in-memory Vecs, then prove.
           let chunk_results: Vec<(
-            E::Scalar, E::Scalar, usize,
-            Vec<E::Scalar>, Vec<E::Scalar>,
-            Vec<E::Scalar>, Vec<E::Scalar>,
-            Vec<E::Scalar>, Vec<E::Scalar>,
-            Vec<E::Scalar>, Vec<E::Scalar>,
+            E::Scalar,
+            E::Scalar,
+            usize,
+            Vec<E::Scalar>,
+            Vec<E::Scalar>,
+            Vec<E::Scalar>,
+            Vec<E::Scalar>,
+            Vec<E::Scalar>,
+            Vec<E::Scalar>,
+            Vec<E::Scalar>,
+            Vec<E::Scalar>,
           )> = z_head
             .par_chunks_mut(4)
             .enumerate()
             .map(|(j, z_chunk)| {
-              let folded_z0 = 
-                z_chunk[0].iter().zip(z_chunk[1].iter()).map(|(l, h)| {
-                  l + prev_r_b * (h - l)
-                }).to_vec();
+              let folded_z0 = z_chunk[0]
+                .iter()
+                .zip(z_chunk[1].iter())
+                .map(|(l, h)| l + prev_r_b * (h - l))
+                .to_vec();
               let (a0, b0, c0) = S.multiply_vec(&folded_z0).unwrap();
 
-              let folded_z2 = 
-                z_chunk[2].iter().zip(z_chunk[3].iter()).map(|(l, h)| {
-                  l + prev_r_b * (h - l)
-                }).to_vec();
+              let folded_z2 = z_chunk[2]
+                .iter()
+                .zip(z_chunk[3].iter())
+                .map(|(l, h)| l + prev_r_b * (h - l))
+                .to_vec();
               let (a2, b2, c2) = S.multiply_vec(&folded_z2).unwrap();
 
-              let (e0, qc) = Self::prove_helper_mem(
-                t, (left, right), e_eq_ref,
-                &a0, &b0, &c0, &a2, &b2,
-              );
+              let (e0, qc) =
+                Self::prove_helper_mem(t, (left, right), e_eq_ref, &a0, &b0, &c0, &a2, &b2);
               let w = suffix_weight_full::<E::Scalar>(t, ell_b, j, rhos_ref);
-              (e0 * w, qc * w, j, a0, a2, b0, b2, c0, c2, folded_z0, folded_z2)
+              (
+                e0 * w,
+                qc * w,
+                j,
+                a0,
+                a2,
+                b0,
+                b2,
+                c0,
+                c2,
+                folded_z0,
+                folded_z2,
+              )
             })
             .collect();
 
@@ -667,21 +674,30 @@ where
             let even = std::mem::take(&mut A_layers_mem[$src_even]);
             let odd = &A_layers_mem[$src_odd];
             let mut folded = even;
-            folded.iter_mut().zip(odd.iter()).for_each(|(l, h)| *l += $r_b * (*h - *l));
+            folded
+              .iter_mut()
+              .zip(odd.iter())
+              .for_each(|(l, h)| *l += $r_b * (*h - *l));
             A_layers_mem[$dest] = folded;
           }
           {
             let even = std::mem::take(&mut B_layers_mem[$src_even]);
             let odd = &B_layers_mem[$src_odd];
             let mut folded = even;
-            folded.iter_mut().zip(odd.iter()).for_each(|(l, h)| *l += $r_b * (*h - *l));
+            folded
+              .iter_mut()
+              .zip(odd.iter())
+              .for_each(|(l, h)| *l += $r_b * (*h - *l));
             B_layers_mem[$dest] = folded;
           }
           {
             let even = std::mem::take(&mut C_layers_mem[$src_even]);
             let odd = &C_layers_mem[$src_odd];
             let mut folded = even;
-            folded.iter_mut().zip(odd.iter()).for_each(|(l, h)| *l += $r_b * (*h - *l));
+            folded
+              .iter_mut()
+              .zip(odd.iter())
+              .for_each(|(l, h)| *l += $r_b * (*h - *l));
             C_layers_mem[$dest] = folded;
           }
         }};
@@ -710,11 +726,17 @@ where
               for chunk in [&mut *a_chunk, &mut *b_chunk, &mut *c_chunk] {
                 {
                   let (lo, hi) = chunk.split_at_mut(1);
-                  lo[0].iter_mut().zip(hi[0].iter()).for_each(|(l, h)| *l += prev_r_b * (*h - *l));
+                  lo[0]
+                    .iter_mut()
+                    .zip(hi[0].iter())
+                    .for_each(|(l, h)| *l += prev_r_b * (*h - *l));
                 }
                 {
                   let (lo, hi) = chunk.split_at_mut(3);
-                  lo[2].iter_mut().zip(hi[0].iter()).for_each(|(l, h)| *l += prev_r_b * (*h - *l));
+                  lo[2]
+                    .iter_mut()
+                    .zip(hi[0].iter())
+                    .for_each(|(l, h)| *l += prev_r_b * (*h - *l));
                 }
               }
               let (e0, qc) = Self::prove_helper_mem(
@@ -789,7 +811,8 @@ where
 
     let (_fold_final_span, fold_final_t) = start_span!("fold_witnesses");
     let instance_length = Us[0].X.len();
-    let folded_W = R1CSWitness::fold_multiple_streaming(&r_bs, &Ws_r_W, &Z_layers_mem, instance_length)?;
+    let folded_W =
+      R1CSWitness::fold_multiple_streaming(&r_bs, &Ws_r_W, &Z_layers_mem, instance_length)?;
     // if use_truncated_fold {
     //   let full_dim = S.num_shared + S.num_precommitted + S.num_rest;
     //   folded_W.W.resize(full_dim, E::Scalar::ZERO);
@@ -813,7 +836,7 @@ where
 
     let comms: Vec<_> = Us.iter().map(|U| U.comm_W.clone()).collect();
     let comm_acc = <E::PCS as FoldingEngineTrait<E>>::fold_commitments(&comms, &w)?;
-    
+
     // if use_truncated_fold {
     //   let num_data_rows = (S.num_shared + S.num_precommitted).div_ceil(DEFAULT_COMMITMENT_WIDTH);
     //   <E::PCS as FoldingEngineTrait<E>>::fold_commitments_partial(
@@ -1031,8 +1054,7 @@ where
     let (_prep_span, prep_t) = start_span!("shared_initialization");
 
     // Shared witness (serial): seed for all per-circuit clones.
-    let ps =
-      SatisfyingAssignment::shared_witness(&pk.S_step, &pk.ck, &step_circuits[0], is_small)?;
+    let ps = SatisfyingAssignment::shared_witness(&pk.S_step, &pk.ck, &step_circuits[0], is_small)?;
 
     // Core precommitted witness + rerandomize (serial): produces comm_W_shared needed by steps.
     let mut ps_core = ps.clone();
@@ -1096,32 +1118,38 @@ where
             transcript.absorb(b"vk", &pk.vk_digest);
             transcript.absorb(b"num_circuits", &E::Scalar::from(n as u64));
             transcript.absorb(b"circuit_index", &E::Scalar::from(i as u64));
-            let public_values = step_circuits[i].public_values().map_err(|e| {
-              SpartanError::SynthesisError {
-                reason: format!("Circuit does not provide public IO: {e}"),
-              }
-            })?;
+            let public_values =
+              step_circuits[i]
+                .public_values()
+                .map_err(|e| SpartanError::SynthesisError {
+                  reason: format!("Circuit does not provide public IO: {e}"),
+                })?;
             transcript.absorb(b"public_values", &public_values.as_slice());
 
-            let (split_instance, witness) = SatisfyingAssignment::r1cs_instance_and_witness_no_small_path(
-              &mut ps_i,
-              &pk.S_step,
-              &pk.ck,
-              &step_circuits[i],
-              &mut transcript,
-            )?;
+            let (split_instance, witness) =
+              SatisfyingAssignment::r1cs_instance_and_witness_no_small_path(
+                &mut ps_i,
+                &pk.S_step,
+                &pk.ck,
+                &step_circuits[i],
+                &mut transcript,
+              )?;
 
             let regular_instance = split_instance.to_regular_instance()?;
 
-            let R1CSWitness { W, r_W, is_small: _ } = witness;
+            let R1CSWitness {
+              W,
+              r_W,
+              is_small: _,
+            } = witness;
             // TODO: Make this stylistically look like Pratyush's code.
             // TODO: should be able to do a non-owning iter and move it up to get a bit more interleaving.
-            
+
             let mut z = Vec::with_capacity(W.len() + 1 + regular_instance.X.len());
             z.extend_from_slice(&W);
             z.push(E::Scalar::ONE);
             z.extend_from_slice(&regular_instance.X);
-            
+
             let z_fv = from_iter(z.into_iter()).to_file_vec();
 
             let instance_hash: [u8; 32] = {
@@ -1137,11 +1165,12 @@ where
       || -> Result<_, SpartanError> {
         let mut transcript = E::TE::new(b"neutronnova_prove");
         transcript.absorb(b"vk", &pk.vk_digest);
-        let public_values_core = core_circuit.public_values().map_err(|e| {
-          SpartanError::SynthesisError {
-            reason: format!("Core circuit does not provide public IO: {e}"),
-          }
-        })?;
+        let public_values_core =
+          core_circuit
+            .public_values()
+            .map_err(|e| SpartanError::SynthesisError {
+              reason: format!("Core circuit does not provide public IO: {e}"),
+            })?;
         transcript.absorb(b"public_values", &public_values_core.as_slice());
         let (core_instance, core_witness) = SatisfyingAssignment::r1cs_instance_and_witness(
           &mut ps_core,
@@ -1548,17 +1577,20 @@ where
       start_span!("validate_instances", instances = step_instances.len());
     let (step_val_result, core_val_result) = rayon::join(
       || -> Result<(), SpartanError> {
-        step_instances.par_iter().enumerate().try_for_each(|(i, u)| {
-          let mut transcript = E::TE::new(b"neutronnova_prove");
-          transcript.absorb(b"vk", &vk.digest()?);
-          transcript.absorb(
-            b"num_circuits",
-            &E::Scalar::from(step_instances.len() as u64),
-          );
-          transcript.absorb(b"circuit_index", &E::Scalar::from(i as u64));
-          transcript.absorb(b"public_values", &u.public_values.as_slice());
-          u.validate(&vk.S_step, &mut transcript)
-        })
+        step_instances
+          .par_iter()
+          .enumerate()
+          .try_for_each(|(i, u)| {
+            let mut transcript = E::TE::new(b"neutronnova_prove");
+            transcript.absorb(b"vk", &vk.digest()?);
+            transcript.absorb(
+              b"num_circuits",
+              &E::Scalar::from(step_instances.len() as u64),
+            );
+            transcript.absorb(b"circuit_index", &E::Scalar::from(i as u64));
+            transcript.absorb(b"public_values", &u.public_values.as_slice());
+            u.validate(&vk.S_step, &mut transcript)
+          })
       },
       || -> Result<(), SpartanError> {
         let mut transcript = E::TE::new(b"neutronnova_prove");
@@ -1745,15 +1777,21 @@ where
     let (_fold_commitments_span, fold_commitments_t) = start_span!("fold_commitments");
     let eval_w_step_commit_round = num_rounds_b + 1 + num_rounds_x + 1 + num_rounds_y + 1;
     let (comm_result, comm_eval_result) = rayon::join(
-      || <E::PCS as FoldingEngineTrait<E>>::fold_commitments(
-        &[folded_U.comm_W, core_instance_regular.comm_W],
-        &[E::Scalar::ONE, c_eval],
-      ),
-      || <E::PCS as FoldingEngineTrait<E>>::fold_commitments(
-        &[self.U_verifier.comm_w_per_round[eval_w_step_commit_round].clone(),
-          self.U_verifier.comm_w_per_round[eval_w_step_commit_round + 1].clone()],
-        &[E::Scalar::ONE, c_eval],
-      ),
+      || {
+        <E::PCS as FoldingEngineTrait<E>>::fold_commitments(
+          &[folded_U.comm_W, core_instance_regular.comm_W],
+          &[E::Scalar::ONE, c_eval],
+        )
+      },
+      || {
+        <E::PCS as FoldingEngineTrait<E>>::fold_commitments(
+          &[
+            self.U_verifier.comm_w_per_round[eval_w_step_commit_round].clone(),
+            self.U_verifier.comm_w_per_round[eval_w_step_commit_round + 1].clone(),
+          ],
+          &[E::Scalar::ONE, c_eval],
+        )
+      },
     );
     let comm = comm_result?;
     let comm_eval = comm_eval_result?;

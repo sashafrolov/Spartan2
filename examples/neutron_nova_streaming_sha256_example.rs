@@ -9,10 +9,7 @@
 mod sha256_circuit;
 
 use sha256_circuit::Sha256Circuit;
-use spartan2::{
-  neutronnova_zk_streaming::NeutronNovaZkSNARK,
-  provider::T256HyraxEngine,
-};
+use spartan2::{neutronnova_zk_streaming::NeutronNovaZkSNARK, provider::T256HyraxEngine};
 use std::time::Instant;
 use tracing::{info, info_span};
 
@@ -66,8 +63,7 @@ fn main() {
   let core_circuit = &step_circuits[0];
 
   let t0 = Instant::now();
-  let snark =
-    NeutronNovaZkSNARK::prove(&pk, &step_circuits, core_circuit, true).unwrap();
+  let snark = NeutronNovaZkSNARK::prove(&pk, &step_circuits, core_circuit, true).unwrap();
   info!(elapsed_ms = t0.elapsed().as_millis(), "prove");
 
   let t0 = Instant::now();

@@ -7,7 +7,10 @@ use spartan2::traits::{Engine, circuit::SpartanCircuit};
 
 pub const BYTES_PER_FIELD_ELEMENT: usize = 30;
 
-pub fn generate_random_vector<Scalar: PrimeField + PrimeFieldBits>(length: usize, seed: u64) -> Vec<Scalar> {
+pub fn generate_random_vector<Scalar: PrimeField + PrimeFieldBits>(
+  length: usize,
+  seed: u64,
+) -> Vec<Scalar> {
   let mut rng = StdRng::seed_from_u64(seed);
   (0..length)
     .map(|_| Scalar::from_u128(rng.gen_range(0..((1u128 << 127) as u128))))
@@ -499,11 +502,13 @@ impl<E: Engine> SpartanCircuit<E> for ExampleVideoEditCircuit<E::Scalar> {
 
     for (k, (lc, scalar)) in packed_lcs.iter().zip(packed_scalars.iter()).enumerate() {
       if let Some(prev) = &input_poly_eval_prev {
-        input_poly_eval_scalar = input_poly_eval_scalar * self.input_polynomial_interpolation_challenge + scalar;
+        input_poly_eval_scalar =
+          input_poly_eval_scalar * self.input_polynomial_interpolation_challenge + scalar;
 
-        let input_eval_var = AllocatedNum::alloc(cs.namespace(|| format!("input poly eval {k}")), || {
-          Ok(input_poly_eval_scalar)
-        })?;
+        let input_eval_var =
+          AllocatedNum::alloc(cs.namespace(|| format!("input poly eval {k}")), || {
+            Ok(input_poly_eval_scalar)
+          })?;
 
         cs.enforce(
           || format!("input poly eval constraint {k}"),
@@ -516,9 +521,10 @@ impl<E: Engine> SpartanCircuit<E> for ExampleVideoEditCircuit<E::Scalar> {
       } else {
         input_poly_eval_scalar = *scalar;
 
-        let input_eval_var = AllocatedNum::alloc(cs.namespace(|| format!("input poly eval {k}")), || {
-          Ok(input_poly_eval_scalar)
-        })?;
+        let input_eval_var =
+          AllocatedNum::alloc(cs.namespace(|| format!("input poly eval {k}")), || {
+            Ok(input_poly_eval_scalar)
+          })?;
 
         cs.enforce(
           || format!("input poly eval constraint {k}"),
@@ -531,10 +537,10 @@ impl<E: Engine> SpartanCircuit<E> for ExampleVideoEditCircuit<E::Scalar> {
       }
     }
     let input_poly_eval = input_poly_eval_prev.unwrap();
-    let public_input_poly_eval = AllocatedNum::alloc_input(
-      cs.namespace(|| "public_input_poly_eval"),
-      || Ok(self.public_input_poly_eval),
-    )?;
+    let public_input_poly_eval =
+      AllocatedNum::alloc_input(cs.namespace(|| "public_input_poly_eval"), || {
+        Ok(self.public_input_poly_eval)
+      })?;
     cs.enforce(
       || "public_input_poly_eval equality",
       |lc| lc + CS::one(),
@@ -577,13 +583,19 @@ impl<E: Engine> SpartanCircuit<E> for ExampleVideoEditCircuit<E::Scalar> {
     let mut output_poly_eval_prev: Option<AllocatedNum<E::Scalar>> = None;
     let mut output_poly_eval_scalar = E::Scalar::ZERO;
 
-    for (k, (lc, scalar)) in output_packed_lcs.iter().zip(output_packed_scalars.iter()).enumerate() {
+    for (k, (lc, scalar)) in output_packed_lcs
+      .iter()
+      .zip(output_packed_scalars.iter())
+      .enumerate()
+    {
       if let Some(prev) = &output_poly_eval_prev {
-        output_poly_eval_scalar = output_poly_eval_scalar * self.output_polynomial_interpolation_challenge + scalar;
+        output_poly_eval_scalar =
+          output_poly_eval_scalar * self.output_polynomial_interpolation_challenge + scalar;
 
-        let output_eval_var = AllocatedNum::alloc(cs.namespace(|| format!("output poly eval {k}")), || {
-          Ok(output_poly_eval_scalar)
-        })?;
+        let output_eval_var =
+          AllocatedNum::alloc(cs.namespace(|| format!("output poly eval {k}")), || {
+            Ok(output_poly_eval_scalar)
+          })?;
 
         cs.enforce(
           || format!("output poly eval constraint {k}"),
@@ -596,9 +608,10 @@ impl<E: Engine> SpartanCircuit<E> for ExampleVideoEditCircuit<E::Scalar> {
       } else {
         output_poly_eval_scalar = *scalar;
 
-        let output_eval_var = AllocatedNum::alloc(cs.namespace(|| format!("output poly eval {k}")), || {
-          Ok(output_poly_eval_scalar)
-        })?;
+        let output_eval_var =
+          AllocatedNum::alloc(cs.namespace(|| format!("output poly eval {k}")), || {
+            Ok(output_poly_eval_scalar)
+          })?;
 
         cs.enforce(
           || format!("output poly eval constraint {k}"),
@@ -611,10 +624,10 @@ impl<E: Engine> SpartanCircuit<E> for ExampleVideoEditCircuit<E::Scalar> {
       }
     }
     let output_poly_eval = output_poly_eval_prev.unwrap();
-    let public_output_poly_eval = AllocatedNum::alloc_input(
-      cs.namespace(|| "public_output_poly_eval"),
-      || Ok(self.public_output_poly_eval),
-    )?;
+    let public_output_poly_eval =
+      AllocatedNum::alloc_input(cs.namespace(|| "public_output_poly_eval"), || {
+        Ok(self.public_output_poly_eval)
+      })?;
     cs.enforce(
       || "public_output_poly_eval equality",
       |lc| lc + CS::one(),

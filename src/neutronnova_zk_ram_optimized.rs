@@ -9,20 +9,14 @@
 //! interesting. I consolidated a lot of the stuff at the beginning into one parallel section for
 //! fewer barriers, removed a bunch of "small value sumcheck" stuff, and did similar optimizations
 //! to the transcript absorption.
-use crate::start_span;
 use crate::{
   Commitment, CommitmentKey, DEFAULT_COMMITMENT_WIDTH, VerifierKey,
   bellpepper::{
-    r1cs::{
-      MultiRoundSpartanShape, MultiRoundSpartanWitness, SpartanShape,
-      SpartanWitness,
-    },
+    r1cs::{MultiRoundSpartanShape, MultiRoundSpartanWitness, SpartanShape, SpartanWitness},
     shape_cs::ShapeCS,
     solver::SatisfyingAssignment,
   },
-  big_num::{
-    DelayedReduction,
-  },
+  big_num::DelayedReduction,
   digest::DigestComputer,
   errors::SpartanError,
   math::Math,
@@ -37,6 +31,7 @@ use crate::{
     R1CSInstance, R1CSShape, R1CSWitness, RelaxedR1CSInstance, SplitMultiRoundR1CSInstance,
     SplitMultiRoundR1CSShape, SplitR1CSInstance, SplitR1CSShape, weights_from_r,
   },
+  start_span,
   sumcheck::SumcheckProof,
   traits::{
     Engine, Group,
@@ -224,8 +219,8 @@ where
     vc: &mut NeutronNovaVerifierCircuit<E>,
     vc_state: &mut <SatisfyingAssignment<E> as MultiRoundSpartanWitness<E>>::MultiRoundState, // wrapper circuit, fine
     vc_shape: &SplitMultiRoundR1CSShape<E>, // wrapper circuit, fine
-    vc_ck: &CommitmentKey<E>, // wrapper circuit related, fine
-    transcript: &mut E::TE, // just a hash
+    vc_ck: &CommitmentKey<E>,               // wrapper circuit related, fine
+    transcript: &mut E::TE,                 // just a hash
     mut instance_hashes: Vec<[u8; 32]>,
   ) -> Result<
     (
@@ -736,8 +731,7 @@ where
     let (_prep_span, prep_t) = start_span!("shared_initialization");
 
     // Shared witness (serial): seed for all per-circuit clones.
-    let ps =
-      SatisfyingAssignment::shared_witness(&pk.S_step, &pk.ck, &step_circuits[0], is_small)?;
+    let ps = SatisfyingAssignment::shared_witness(&pk.S_step, &pk.ck, &step_circuits[0], is_small)?;
 
     // Core precommitted witness + rerandomize (serial): produces comm_W_shared needed by steps.
     let mut ps_core = ps.clone();
@@ -801,20 +795,22 @@ where
             transcript.absorb(b"vk", &pk.vk_digest);
             transcript.absorb(b"num_circuits", &E::Scalar::from(n as u64));
             transcript.absorb(b"circuit_index", &E::Scalar::from(i as u64));
-            let public_values = step_circuits[i].public_values().map_err(|e| {
-              SpartanError::SynthesisError {
-                reason: format!("Circuit does not provide public IO: {e}"),
-              }
-            })?;
+            let public_values =
+              step_circuits[i]
+                .public_values()
+                .map_err(|e| SpartanError::SynthesisError {
+                  reason: format!("Circuit does not provide public IO: {e}"),
+                })?;
             transcript.absorb(b"public_values", &public_values.as_slice());
 
-            let (split_instance, witness) = SatisfyingAssignment::r1cs_instance_and_witness_no_small_path(
-              &mut ps_i,
-              &pk.S_step,
-              &pk.ck,
-              &step_circuits[i],
-              &mut transcript,
-            )?;
+            let (split_instance, witness) =
+              SatisfyingAssignment::r1cs_instance_and_witness_no_small_path(
+                &mut ps_i,
+                &pk.S_step,
+                &pk.ck,
+                &step_circuits[i],
+                &mut transcript,
+              )?;
 
             let regular_instance = split_instance.to_regular_instance()?;
 
@@ -830,18 +826,27 @@ where
             z.extend_from_slice(&regular_instance.X);
             let (av, bv, cv) = pk.S_step.multiply_vec(&z)?;
 
-            Ok((split_instance, witness, regular_instance, av, bv, cv, instance_hash))
+            Ok((
+              split_instance,
+              witness,
+              regular_instance,
+              av,
+              bv,
+              cv,
+              instance_hash,
+            ))
           })
           .collect()
       },
       || -> Result<_, SpartanError> {
         let mut transcript = E::TE::new(b"neutronnova_prove");
         transcript.absorb(b"vk", &pk.vk_digest);
-        let public_values_core = core_circuit.public_values().map_err(|e| {
-          SpartanError::SynthesisError {
-            reason: format!("Core circuit does not provide public IO: {e}"),
-          }
-        })?;
+        let public_values_core =
+          core_circuit
+            .public_values()
+            .map_err(|e| SpartanError::SynthesisError {
+              reason: format!("Core circuit does not provide public IO: {e}"),
+            })?;
         transcript.absorb(b"public_values", &public_values_core.as_slice());
         let (core_instance, core_witness) = SatisfyingAssignment::r1cs_instance_and_witness(
           &mut ps_core,
@@ -1251,14 +1256,20 @@ where
     let vk_digest = vk.digest()?;
     let (step_val_result, core_val_result) = rayon::join(
       || -> Result<(), SpartanError> {
-        step_instances.par_iter().enumerate().try_for_each(|(i, u)| {
-          let mut transcript = E::TE::new(b"neutronnova_prove");
-          transcript.absorb(b"vk", &vk_digest);
-          transcript.absorb(b"num_circuits", &E::Scalar::from(step_instances.len() as u64));
-          transcript.absorb(b"circuit_index", &E::Scalar::from(i as u64));
-          transcript.absorb(b"public_values", &u.public_values.as_slice());
-          u.validate(&vk.S_step, &mut transcript)
-        })
+        step_instances
+          .par_iter()
+          .enumerate()
+          .try_for_each(|(i, u)| {
+            let mut transcript = E::TE::new(b"neutronnova_prove");
+            transcript.absorb(b"vk", &vk_digest);
+            transcript.absorb(
+              b"num_circuits",
+              &E::Scalar::from(step_instances.len() as u64),
+            );
+            transcript.absorb(b"circuit_index", &E::Scalar::from(i as u64));
+            transcript.absorb(b"public_values", &u.public_values.as_slice());
+            u.validate(&vk.S_step, &mut transcript)
+          })
       },
       || -> Result<(), SpartanError> {
         let mut transcript = E::TE::new(b"neutronnova_prove");

@@ -7,14 +7,14 @@
 //   RUSTFLAGS="-C target-cpu=native" cargo run --example compute_jnd_map_rust --release
 
 use image::{GrayImage, ImageBuffer, Luma};
-use imageproc::distance_transform::Norm;
-use imageproc::edges::canny;
-use imageproc::morphology::dilate;
+use imageproc::{distance_transform::Norm, edges::canny, morphology::dilate};
 use ndarray::Array2;
 use rayon::prelude::*;
-use std::f32::consts::PI;
-use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::{
+  f32::consts::PI,
+  path::{Path, PathBuf},
+  time::Instant,
+};
 
 const EPS: f32 = 1e-6;
 
@@ -102,7 +102,11 @@ fn bg_lum_jnd(img: &Array2<f32>) -> Array2<f32> {
   let adapt = bg_raw.mapv(|v| (min_lum + v * (127.0 - min_lum) / 127.0 + EPS).round());
 
   let bg = Array2::from_shape_fn(img.dim(), |(i, j)| {
-    if bg_raw[[i, j]] <= 127.0 { adapt[[i, j]] } else { bg_raw[[i, j]] }
+    if bg_raw[[i, j]] <= 127.0 {
+      adapt[[i, j]]
+    } else {
+      bg_raw[[i, j]]
+    }
   });
 
   bg.mapv(|v| 0.7 * lut[v.clamp(0.0, 255.0) as usize])
@@ -119,7 +123,9 @@ fn luminance_contrast(img: &Array2<f32>) -> Array2<f32> {
     if i < r || i >= h - r || j < r || j >= w - r {
       0.0
     } else {
-      (sq_mean[[i, j]] - mean[[i, j]] * mean[[i, j]]).max(0.0).sqrt()
+      (sq_mean[[i, j]] - mean[[i, j]] * mean[[i, j]])
+        .max(0.0)
+        .sqrt()
     }
   })
 }
@@ -131,8 +137,19 @@ fn ori_complexity(img: &Array2<f32>) -> Array2<f32> {
 
   let kx = Array2::from_shape_vec(
     (3, 3),
-    vec![-1.0/3.0, 0.0, 1.0/3.0, -1.0/3.0, 0.0, 1.0/3.0, -1.0/3.0, 0.0, 1.0/3.0],
-  ).unwrap();
+    vec![
+      -1.0 / 3.0,
+      0.0,
+      1.0 / 3.0,
+      -1.0 / 3.0,
+      0.0,
+      1.0 / 3.0,
+      -1.0 / 3.0,
+      0.0,
+      1.0 / 3.0,
+    ],
+  )
+  .unwrap();
   let ky = kx.t().to_owned();
 
   // 8 neighbor (dx,dy) offsets into the padded image for output pixel (i,j).
@@ -160,11 +177,15 @@ fn ori_complexity(img: &Array2<f32>) -> Array2<f32> {
   let o_norm = Array2::from_shape_fn((ph, pw), |(i, j)| -> i32 {
     let angle = if cv[[i, j]] {
       let mut a = (gy[[i, j]].atan2(gx[[i, j]]) / PI * 180.0 + EPS).round();
-      if a > 90.0 { a -= 180.0; }
-      if a < -90.0 { a += 180.0; }
+      if a > 90.0 {
+        a -= 180.0;
+      }
+      if a < -90.0 {
+        a += 180.0;
+      }
       a + 90.0
     } else {
-      180.0 + 2.0 * otr  // invalid bin marker
+      180.0 + 2.0 * otr // invalid bin marker
     };
     (angle / 2.0 / otr + EPS).round() as i32
   });
@@ -193,8 +214,14 @@ fn ori_complexity(img: &Array2<f32>) -> Array2<f32> {
   }
 
   // Border pixels and non-edge pixels → complexity = 1 (matches Python cmlx[:r,:] = 1 etc.)
-  for j in 0..ow { cmlx[[0, j]] = 1.0; cmlx[[oh - 1, j]] = 1.0; }
-  for i in 0..oh { cmlx[[i, 0]] = 1.0; cmlx[[i, ow - 1]] = 1.0; }
+  for j in 0..ow {
+    cmlx[[0, j]] = 1.0;
+    cmlx[[oh - 1, j]] = 1.0;
+  }
+  for i in 0..oh {
+    cmlx[[i, 0]] = 1.0;
+    cmlx[[i, ow - 1]] = 1.0;
+  }
 
   correlate_2d(&cmlx, &gkern(3, 1.0))
 }
@@ -217,7 +244,9 @@ fn edge_protect(img: &Array2<f32>) -> Array2<f32> {
     let g = correlate_2d(img, ker).mapv(|v| (v / 16.0).abs());
     for i in 0..h {
       for j in 0..w {
-        if g[[i, j]] > max_grad[[i, j]] { max_grad[[i, j]] = g[[i, j]]; }
+        if g[[i, j]] > max_grad[[i, j]] {
+          max_grad[[i, j]] = g[[i, j]];
+        }
       }
     }
   }
@@ -240,7 +269,11 @@ fn edge_protect(img: &Array2<f32>) -> Array2<f32> {
   let dilated = dilate(&edge_img, Norm::L1, 3);
 
   let not_edge = Array2::from_shape_fn((h, w), |(i, j)| {
-    if dilated.get_pixel(j as u32, i as u32)[0] > 0 { 0.0f32 } else { 1.0 }
+    if dilated.get_pixel(j as u32, i as u32)[0] > 0 {
+      0.0f32
+    } else {
+      1.0
+    }
   });
 
   correlate_2d(&not_edge, &gkern(5, 0.8))
@@ -284,7 +317,9 @@ fn save_jnd(map: &Array2<f32>, path: &Path) {
   let img: GrayImage = ImageBuffer::from_fn(w as u32, h as u32, |x, y| {
     Luma([map[[y as usize, x as usize]].floor().clamp(0.0, 255.0) as u8])
   });
-  img.save(path).unwrap_or_else(|_| panic!("cannot save {}", path.display()));
+  img
+    .save(path)
+    .unwrap_or_else(|_| panic!("cannot save {}", path.display()));
 }
 
 fn main() {
@@ -322,8 +357,14 @@ fn main() {
   let n = timings.len() as f64;
   let total_compute: f64 = timings.iter().map(|d| d.as_secs_f64()).sum();
   let mean_ms = total_compute / n * 1000.0;
-  let min_ms = timings.iter().map(|d| d.as_secs_f64() * 1000.0).fold(f64::INFINITY, f64::min);
-  let max_ms = timings.iter().map(|d| d.as_secs_f64() * 1000.0).fold(0.0f64, f64::max);
+  let min_ms = timings
+    .iter()
+    .map(|d| d.as_secs_f64() * 1000.0)
+    .fold(f64::INFINITY, f64::min);
+  let max_ms = timings
+    .iter()
+    .map(|d| d.as_secs_f64() * 1000.0)
+    .fold(0.0f64, f64::max);
 
   println!(
     "\nDone in {:.1}s wall time  |  compute: mean {mean_ms:.1}ms  min {min_ms:.1}ms  max {max_ms:.1}ms",

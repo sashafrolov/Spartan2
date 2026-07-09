@@ -358,7 +358,10 @@ fn main() {
 
   // Dummy zero-image circuit used for shape/key derivation only.
   let shape_circuit =
-    ExampleVideoEditCircuit::<<E as Engine>::Scalar>::new(vec![vec![0u8; IMAGE_WIDTH]; IMAGE_HEIGHT]);
+    ExampleVideoEditCircuit::<<E as Engine>::Scalar>::new(vec![
+      vec![0u8; IMAGE_WIDTH];
+      IMAGE_HEIGHT
+    ]);
 
   let t0 = Instant::now();
   let (pk, vk) =
@@ -369,7 +372,9 @@ fn main() {
   // Build step circuits — each with a distinct random image.
   let t0 = Instant::now();
   let step_circuits: Vec<ExampleVideoEditCircuit<<E as Engine>::Scalar>> = (0..NUM_CIRCUITS)
-    .map(|_| ExampleVideoEditCircuit::<<E as Engine>::Scalar>::new(generate_random_image(image_dims)))
+    .map(|_| {
+      ExampleVideoEditCircuit::<<E as Engine>::Scalar>::new(generate_random_image(image_dims))
+    })
     .collect();
   info!(elapsed_ms = t0.elapsed().as_millis(), "generate_witness");
 

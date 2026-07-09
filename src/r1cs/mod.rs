@@ -6,11 +6,16 @@
 
 //! This module defines R1CS related types
 use crate::{
-  Blind, Commitment, CommitmentKey, DEFAULT_COMMITMENT_WIDTH, PCS, VerifierKey, big_num::{DelayedReduction, montgomery::MontgomeryLimbs}, digest::SimpleDigestible, errors::SpartanError, math::Math, traits::{
+  Blind, Commitment, CommitmentKey, DEFAULT_COMMITMENT_WIDTH, PCS, VerifierKey,
+  big_num::{DelayedReduction, montgomery::MontgomeryLimbs},
+  digest::SimpleDigestible,
+  errors::SpartanError,
+  math::Math,
+  traits::{
     Engine,
     pcs::{FoldingEngineTrait, PCSEngineTrait},
     transcript::{TranscriptEngineTrait, TranscriptReprTrait},
-  }
+  },
 };
 use core::cmp::max;
 use ff::{Field, PrimeField};
@@ -22,9 +27,7 @@ use serde::{Deserialize, Serialize};
 
 mod folds;
 mod sparse;
-pub(crate) use sparse::FilteredSpmv;
-pub(crate) use sparse::PrecomputedSparseMatrix;
-pub(crate) use sparse::SparseMatrix;
+pub(crate) use sparse::{FilteredSpmv, PrecomputedSparseMatrix, SparseMatrix};
 
 /// Fused evaluation of three sparse matrices at (T_x, T_y).
 /// Processes all three matrices per row to improve T_y cache reuse.
@@ -675,10 +678,9 @@ impl<E: Engine> R1CSWitness<E> {
 
     let w_full = weights_from_r::<E::Scalar>(r_bs, blinds_n);
     let non_w_length = instance_length + 1;
-    
+
     let suffix_vars_len = Zs.len().log_2();
     let w_partial = weights_from_r::<E::Scalar>(&r_bs[r_bs.len() - suffix_vars_len..], witness_n);
-
 
     if w_full.len() != blinds_n {
       return Err(SpartanError::InvalidInputLength {
@@ -709,18 +711,18 @@ impl<E: Engine> R1CSWitness<E> {
       .enumerate()
       .for_each(|(block_idx, acc_blk)| {
         let start = block_idx * tile;
-          type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
-          for (j, acc_blk_j) in acc_blk.iter_mut().enumerate() {
-            let mut acc = Acc::<E::Scalar>::default();
-            for (i, &wi) in w_partial.iter().enumerate() {
-              <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
-                &mut acc,
-                &wi,
-                &Zs[i][start + j],
-              );
-            }
-            *acc_blk_j = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc);
+        type Acc<S> = <S as DelayedReduction<S>>::Accumulator;
+        for (j, acc_blk_j) in acc_blk.iter_mut().enumerate() {
+          let mut acc = Acc::<E::Scalar>::default();
+          for (i, &wi) in w_partial.iter().enumerate() {
+            <E::Scalar as DelayedReduction<E::Scalar>>::unreduced_multiply_accumulate(
+              &mut acc,
+              &wi,
+              &Zs[i][start + j],
+            );
           }
+          *acc_blk_j = <E::Scalar as DelayedReduction<E::Scalar>>::reduce(&acc);
+        }
       });
 
     let acc_r = <E::PCS as FoldingEngineTrait<E>>::fold_blinds(
@@ -780,7 +782,8 @@ impl<E: Engine> R1CSInstance<E> {
     let d = Us[0].X.len();
 
     // X
-    let X_acc = Us.par_iter()
+    let X_acc = Us
+      .par_iter()
       .zip(w.par_iter())
       .fold(
         || vec![E::Scalar::ZERO; d],
