@@ -60,6 +60,10 @@ proptest = "1.2.0"
 image = "0.25"
 ndarray = "0.16"
 imageproc = "0.25"
+ark-bls12-381 = { version = "0.5.0", default-features = false, features = ["curve"] }
+ark-poly = "0.5.0"
+ark-poly-commit = "0.5.0"
+ark-serialize = "0.5.0"
 
 [features]
 default = []

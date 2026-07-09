@@ -76,3 +76,11 @@ Build: `RUSTFLAGS="-C target-cpu=native" cargo build --example neutron_nova_stre
 Reserve machine: `srun --partition=standard --nodes=1 --ntasks=1 --cpus-per-task=64 --mem=256G --time=2:00:00 --pty bash`
 Run: `RUST_LOG=neutron_nova_streaming_resizing=info,spartan2::neutronnova_zk_streaming=info RUSTFLAGS="-C target-cpu=native" cargo run --example neutron_nova_streaming_resizing --release`
 To get RAM usage: `RUST_LOG=neutron_nova_streaming_resizing=info,spartan2::neutronnova_zk_streaming=info RUSTFLAGS="-C target-cpu=native" /usr/bin/time -v cargo run --example neutron_nova_streaming_resizing --release`
+
+# PCS-based signatures
+We have some baselines for our actual PCS-based signature implementation. These commands do an example PCS based signature commit/sign/interpolate/verify flow. It uses the previously generated decomposed frames
+as data to authenticate.
+
+Run: `RUSTFLAGS="-C target-cpu=native" cargo run --release --example video_pcs_authentication_benchmark`
+Note, you can prepend `PARALLEL_VERIFICATION=true` to experiment with verification happening in a multithreaded manner. 
+`VIDEO_PCS_MAX_FILES` can generate signatures for a smaller number of files if desired.

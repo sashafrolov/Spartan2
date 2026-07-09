@@ -1,4 +1,4 @@
-//! Benchmark PCS authentication for decomposed video frame channels.
+//! Benchmark KZG10 authentication for decomposed video frame channels.
 //!
 //! Run with:
 //!   RUSTFLAGS="-C target-cpu=native" cargo run --release --example video_pcs_authentication_benchmark
@@ -6,17 +6,21 @@
 //! Useful environment variables:
 //!   VIDEO_CHANNEL_DIR=video_data/decomposed_frame_channels
 //!   VIDEO_PCS_MAX_FILES=30
-//!   VIDEO_PCS_COMMITMENT_WIDTH=2048
 //!   VIDEO_PCS_PRINT_PER_CHANNEL=1
+//!   PARALLEL_VERIFICATION=true
+//!   RAYON_NUM_THREADS=8
 
-use ff::PrimeField;
+use ark_bls12_381::{Bls12_381, Fr};
+use ark_poly::{DenseUVPolynomial, Polynomial, univariate::DensePolynomial};
+use ark_poly_commit::kzg10::{
+  Commitment as KzgCommitment, KZG10, Powers, Proof, Randomness, UniversalParams, VerifierKey,
+};
+use ark_serialize::{CanonicalSerialize, Compress};
 use image::ImageReader;
 use rand::{Rng, SeedableRng, rngs::StdRng};
-use spartan2::{
-  provider::T256HyraxEngine,
-  traits::{Engine, pcs::PCSEngineTrait, transcript::TranscriptEngineTrait},
-};
+use rayon::prelude::*;
 use std::{
+  borrow::Cow,
   env,
   error::Error,
   fmt::Write as _,
@@ -29,16 +33,11 @@ use std::{
 
 const DEFAULT_CHANNEL_DIR: &str = "video_data/decomposed_frame_channels";
 const BYTES_PER_FIELD_ELEMENT: usize = 30;
-const DEFAULT_COMMITMENT_WIDTH: usize = 2048;
 const CIRCUIT_INPUT_CHALLENGE_OFFSET: u64 = 3;
-// The circuits use the offset above for their single Horner interpolation
-// challenge. The PCS API opens multilinear polynomials, so this benchmark uses
-// a separate deterministic full MLE point for opening proofs.
-const PCS_OPENING_POINT_OFFSET: u64 = 7;
+const KZG_SETUP_SEED: u64 = 0x5eed_c0de;
 
-type Commitment<E> = <<E as Engine>::PCS as PCSEngineTrait<E>>::Commitment;
-type Blind<E> = <<E as Engine>::PCS as PCSEngineTrait<E>>::Blind;
-type EvaluationArgument<E> = <<E as Engine>::PCS as PCSEngineTrait<E>>::EvaluationArgument;
+type UniPoly = DensePolynomial<Fr>;
+type Kzg = KZG10<Bls12_381, UniPoly>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Channel {
@@ -82,8 +81,8 @@ impl Channel {
 struct BenchmarkConfig {
   channel_dir: PathBuf,
   max_files: Option<usize>,
-  requested_commitment_width: usize,
   print_per_channel: bool,
+  parallel_verification: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -94,53 +93,42 @@ struct ChannelFile {
 }
 
 #[derive(Debug)]
-struct ChannelPolynomial<Scalar: PrimeField> {
+struct ChannelPolynomial {
   file: ChannelFile,
   width: u32,
   height: u32,
-  coeffs: Vec<Scalar>,
-  padded_coeffs: Vec<Scalar>,
-  circuit_challenge: Scalar,
-  pcs_opening_point: Vec<Scalar>,
+  coeffs: Vec<Fr>,
+  polynomial: UniPoly,
+  challenge: Fr,
 }
 
 #[derive(Debug)]
-struct CommitmentRecord<E: Engine> {
-  commitment: Commitment<E>,
-  blind: Blind<E>,
+struct CommitmentRecord {
+  commitment: KzgCommitment<Bls12_381>,
+  randomness: Randomness<Fr, UniPoly>,
 }
 
 #[derive(Debug)]
-struct OpeningRecord<E: Engine> {
-  eval: E::Scalar,
-  eval_blind: Blind<E>,
-  eval_commitment: Commitment<E>,
-  argument: EvaluationArgument<E>,
+struct OpeningRecord {
+  eval: Fr,
+  proof: Proof<Bls12_381>,
 }
 
 #[derive(Default)]
 struct PhaseTotals {
   load_and_pack: Duration,
   setup: Duration,
-  commit_blind: Duration,
   commit: Duration,
-  circuit_horner_eval: Duration,
-  prover_mle_eval: Duration,
-  eval_blind: Duration,
-  eval_commit: Duration,
+  horner_eval: Duration,
+  pcs_eval: Duration,
   open: Duration,
-  verifier_mle_eval: Duration,
-  verifier_eval_commit: Duration,
-  verify: Duration,
+  evaluate_interpolation: Duration,
+  verify_pcs_openings: Duration,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-  let _ = rayon::ThreadPoolBuilder::new()
-    .num_threads(1)
-    .build_global();
-
   let config = BenchmarkConfig::from_env()?;
-  run_benchmark::<T256HyraxEngine>(config)
+  run_benchmark(config)
 }
 
 impl BenchmarkConfig {
@@ -150,16 +138,13 @@ impl BenchmarkConfig {
         env::var("VIDEO_CHANNEL_DIR").unwrap_or_else(|_| DEFAULT_CHANNEL_DIR.to_string()),
       ),
       max_files: optional_env_usize("VIDEO_PCS_MAX_FILES")?,
-      requested_commitment_width: env_usize(
-        "VIDEO_PCS_COMMITMENT_WIDTH",
-        DEFAULT_COMMITMENT_WIDTH,
-      )?,
       print_per_channel: env_flag("VIDEO_PCS_PRINT_PER_CHANNEL"),
+      parallel_verification: env_flag("PARALLEL_VERIFICATION"),
     })
   }
 }
 
-fn run_benchmark<E: Engine>(config: BenchmarkConfig) -> Result<(), Box<dyn Error>> {
+fn run_benchmark(config: BenchmarkConfig) -> Result<(), Box<dyn Error>> {
   let wall_start = Instant::now();
   let mut totals = PhaseTotals::default();
 
@@ -180,185 +165,255 @@ fn run_benchmark<E: Engine>(config: BenchmarkConfig) -> Result<(), Box<dyn Error
   let mut polynomials = Vec::with_capacity(files.len());
   for file in files {
     let t0 = Instant::now();
-    let poly = read_channel_polynomial::<E::Scalar>(file)?;
+    let poly = read_channel_polynomial(file)?;
     totals.load_and_pack += t0.elapsed();
     polynomials.push(poly);
   }
 
   let min_coeffs = polynomials.iter().map(|p| p.coeffs.len()).min().unwrap();
   let max_coeffs = polynomials.iter().map(|p| p.coeffs.len()).max().unwrap();
-  let min_padded = polynomials
+  let max_degree = polynomials
     .iter()
-    .map(|p| p.padded_coeffs.len())
-    .min()
-    .unwrap();
-  let max_padded = polynomials
-    .iter()
-    .map(|p| p.padded_coeffs.len())
+    .map(|p| p.polynomial.degree())
     .max()
     .unwrap();
+  let setup_degree = max_degree.max(1);
 
-  let commitment_width = config.requested_commitment_width.min(min_padded);
-  if commitment_width == 0 || !commitment_width.is_power_of_two() {
+  let mut setup_rng = StdRng::seed_from_u64(KZG_SETUP_SEED);
+  let t0 = Instant::now();
+  let pp = Kzg::setup(setup_degree, false, &mut setup_rng)?;
+  let (powers, vk) = trim_kzg_params(&pp, setup_degree)?;
+  totals.setup = t0.elapsed();
+
+  let t0 = Instant::now();
+  let commit_results = polynomials
+    .par_iter()
+    .map(|poly| {
+      let (commitment, randomness) = Kzg::commit(&powers, black_box(&poly.polynomial), None, None)?;
+      let commitment_bytes = serialized_size(&commitment);
+      Ok::<_, ark_poly_commit::Error>((
+        CommitmentRecord {
+          commitment,
+          randomness,
+        },
+        commitment_bytes,
+      ))
+    })
+    .collect::<Result<Vec<_>, _>>()?;
+  totals.commit = t0.elapsed();
+  let commitment_bytes_by_poly = commit_results
+    .iter()
+    .map(|(_, commitment_bytes)| *commitment_bytes)
+    .collect::<Vec<_>>();
+  let total_commitment_bytes = commitment_bytes_by_poly.iter().sum();
+  let commitments = commit_results
+    .into_iter()
+    .map(|(record, _)| record)
+    .collect::<Vec<_>>();
+
+  let horner_evals = if config.parallel_verification {
+    let t0 = Instant::now();
+    let horner_evals = polynomials
+      .par_iter()
+      .map(|poly| evaluate_circuit_horner(black_box(&poly.coeffs), black_box(&poly.challenge)))
+      .collect::<Vec<_>>();
+    totals.horner_eval = t0.elapsed();
+    horner_evals
+  } else {
+    let mut horner_evals = Vec::with_capacity(polynomials.len());
+    for poly in &polynomials {
+      let t0 = Instant::now();
+      let eval = evaluate_circuit_horner(black_box(&poly.coeffs), black_box(&poly.challenge));
+      totals.horner_eval += t0.elapsed();
+      horner_evals.push(black_box(eval));
+    }
+    horner_evals
+  };
+
+  let mut pcs_evals = Vec::with_capacity(polynomials.len());
+  for poly in &polynomials {
+    let t0 = Instant::now();
+    let eval = poly.polynomial.evaluate(black_box(&poly.challenge));
+    totals.pcs_eval += t0.elapsed();
+    if eval != horner_evals[pcs_evals.len()] {
+      return Err(
+        invalid_input(format!(
+          "Horner and KZG polynomial evaluations disagree for {}",
+          poly.file.path.display()
+        ))
+        .into(),
+      );
+    }
+    pcs_evals.push(black_box(eval));
+  }
+
+  let t0 = Instant::now();
+  let opening_results = polynomials
+    .par_iter()
+    .zip(commitments.par_iter())
+    .zip(pcs_evals.par_iter())
+    .map(|((poly, record), eval)| {
+      let proof = Kzg::open(
+        &powers,
+        black_box(&poly.polynomial),
+        poly.challenge,
+        &record.randomness,
+      )?;
+      let opening_proof_bytes = serialized_size(&proof);
+      Ok::<_, ark_poly_commit::Error>((OpeningRecord { eval: *eval, proof }, opening_proof_bytes))
+    })
+    .collect::<Result<Vec<_>, _>>()?;
+  totals.open = t0.elapsed();
+  let opening_proof_bytes_by_poly = opening_results
+    .iter()
+    .map(|(_, opening_proof_bytes)| *opening_proof_bytes)
+    .collect::<Vec<_>>();
+  let total_opening_proof_bytes = opening_proof_bytes_by_poly.iter().sum();
+  let openings = opening_results
+    .into_iter()
+    .map(|(record, _)| record)
+    .collect::<Vec<_>>();
+
+  let mut verifier_evals = Vec::with_capacity(polynomials.len());
+  for (poly, opening) in polynomials.iter().zip(openings.iter()) {
+    let t0 = Instant::now();
+    let recomputed_eval = poly.polynomial.evaluate(black_box(&poly.challenge));
+    totals.evaluate_interpolation += t0.elapsed();
+    if recomputed_eval != opening.eval {
+      return Err(
+        invalid_input(format!(
+          "verifier-side KZG polynomial evaluation mismatch for {}",
+          poly.file.path.display()
+        ))
+        .into(),
+      );
+    }
+    verifier_evals.push(black_box(recomputed_eval));
+  }
+
+  if config.parallel_verification {
+    let t0 = Instant::now();
+    let verify_results = polynomials
+      .par_iter()
+      .zip(commitments.par_iter())
+      .zip(openings.par_iter())
+      .zip(verifier_evals.par_iter())
+      .enumerate()
+      .map(|(i, (((poly, commitment), opening), recomputed_eval))| {
+        let verified = Kzg::check(
+          &vk,
+          &commitment.commitment,
+          poly.challenge,
+          *recomputed_eval,
+          &opening.proof,
+        )?;
+        Ok::<_, ark_poly_commit::Error>((i, verified))
+      })
+      .collect::<Result<Vec<_>, _>>()?;
+    totals.verify_pcs_openings = t0.elapsed();
+
+    if let Some((i, _)) = verify_results.iter().find(|(_, verified)| !*verified) {
+      return Err(
+        invalid_input(format!(
+          "KZG opening verification failed for {}",
+          polynomials[*i].file.path.display()
+        ))
+        .into(),
+      );
+    }
+  } else {
+    for (((poly, commitment), opening), recomputed_eval) in polynomials
+      .iter()
+      .zip(commitments.iter())
+      .zip(openings.iter())
+      .zip(verifier_evals.iter())
+    {
+      let t0 = Instant::now();
+      let verified = Kzg::check(
+        &vk,
+        &commitment.commitment,
+        poly.challenge,
+        *recomputed_eval,
+        &opening.proof,
+      )?;
+      totals.verify_pcs_openings += t0.elapsed();
+      if !verified {
+        return Err(
+          invalid_input(format!(
+            "KZG opening verification failed for {}",
+            poly.file.path.display()
+          ))
+          .into(),
+        );
+      }
+    }
+  }
+
+  if config.print_per_channel {
+    print_per_channel(
+      &polynomials,
+      &commitment_bytes_by_poly,
+      &opening_proof_bytes_by_poly,
+    );
+  }
+
+  print_summary(
+    &config,
+    &polynomials,
+    &totals,
+    wall_start.elapsed(),
+    setup_degree,
+    min_coeffs,
+    max_coeffs,
+    total_commitment_bytes,
+    total_opening_proof_bytes,
+    &commitment_bytes_by_poly,
+    &opening_proof_bytes_by_poly,
+    &horner_evals,
+    &pcs_evals,
+  );
+
+  Ok(())
+}
+
+fn trim_kzg_params(
+  pp: &UniversalParams<Bls12_381>,
+  supported_degree: usize,
+) -> Result<(Powers<'static, Bls12_381>, VerifierKey<Bls12_381>), Box<dyn Error>> {
+  if supported_degree >= pp.powers_of_g.len() {
     return Err(
       invalid_input(format!(
-        "VIDEO_PCS_COMMITMENT_WIDTH must resolve to a positive power of two, got {commitment_width}"
+        "supported degree {supported_degree} exceeds KZG powers length {}",
+        pp.powers_of_g.len()
       ))
       .into(),
     );
   }
 
-  let t0 = Instant::now();
-  let (ck, vk) = E::PCS::setup(b"video_pcs_auth_poly", max_padded, commitment_width);
-  E::PCS::precompute_ck(&ck);
-  let (ck_eval, _) = E::PCS::setup(b"video_pcs_auth_eval", 1, 1);
-  E::PCS::precompute_ck(&ck_eval);
-  totals.setup = t0.elapsed();
+  let powers_of_g = pp.powers_of_g[..=supported_degree].to_vec();
+  let powers_of_gamma_g = (0..=supported_degree)
+    .map(|i| {
+      pp.powers_of_gamma_g
+        .get(&i)
+        .copied()
+        .ok_or_else(|| invalid_input(format!("missing gamma_g power {i}")))
+    })
+    .collect::<Result<Vec<_>, _>>()?;
 
-  let mut commitments: Vec<CommitmentRecord<E>> = Vec::with_capacity(polynomials.len());
-  let mut total_commitment_bytes = 0usize;
-  for poly in &polynomials {
-    let t0 = Instant::now();
-    let blind = E::PCS::blind(&ck, poly.padded_coeffs.len());
-    totals.commit_blind += t0.elapsed();
+  let powers = Powers {
+    powers_of_g: Cow::Owned(powers_of_g),
+    powers_of_gamma_g: Cow::Owned(powers_of_gamma_g),
+  };
+  let vk = VerifierKey {
+    g: pp.powers_of_g[0],
+    gamma_g: pp.powers_of_gamma_g[&0],
+    h: pp.h,
+    beta_h: pp.beta_h,
+    prepared_h: pp.prepared_h.clone(),
+    prepared_beta_h: pp.prepared_beta_h.clone(),
+  };
 
-    let t0 = Instant::now();
-    let commitment = E::PCS::commit(
-      &ck,
-      black_box(&poly.padded_coeffs),
-      black_box(&blind),
-      false,
-    )?;
-    totals.commit += t0.elapsed();
-    total_commitment_bytes += bincode::serialize(&commitment)?.len();
-
-    commitments.push(CommitmentRecord { commitment, blind });
-  }
-
-  let mut circuit_evals = Vec::with_capacity(polynomials.len());
-  for poly in &polynomials {
-    let t0 = Instant::now();
-    let eval = evaluate_circuit_horner(black_box(&poly.coeffs), black_box(&poly.circuit_challenge));
-    totals.circuit_horner_eval += t0.elapsed();
-    circuit_evals.push(black_box(eval));
-  }
-
-  let mut openings: Vec<OpeningRecord<E>> = Vec::with_capacity(polynomials.len());
-  let mut prover_mle_evals = Vec::with_capacity(polynomials.len());
-  let mut total_opening_bytes = 0usize;
-  for (poly, record) in polynomials.iter().zip(commitments.iter()) {
-    let t0 = Instant::now();
-    let eval = evaluate_mle(
-      black_box(&poly.padded_coeffs),
-      black_box(&poly.pcs_opening_point),
-    );
-    totals.prover_mle_eval += t0.elapsed();
-    prover_mle_evals.push(black_box(eval));
-
-    let t0 = Instant::now();
-    let eval_blind = E::PCS::blind(&ck_eval, 1);
-    totals.eval_blind += t0.elapsed();
-
-    let t0 = Instant::now();
-    let eval_commitment = E::PCS::commit(&ck_eval, &[eval], &eval_blind, false)?;
-    totals.eval_commit += t0.elapsed();
-
-    let mut transcript = E::TE::new(b"video_pcs_auth_opening");
-    let t0 = Instant::now();
-    let argument = E::PCS::prove(
-      &ck,
-      &ck_eval,
-      &mut transcript,
-      &record.commitment,
-      black_box(&poly.padded_coeffs),
-      &record.blind,
-      &poly.pcs_opening_point,
-      &eval_commitment,
-      &eval_blind,
-    )?;
-    totals.open += t0.elapsed();
-    total_opening_bytes += bincode::serialize(&eval)?.len();
-    total_opening_bytes += bincode::serialize(&eval_blind)?.len();
-    total_opening_bytes += bincode::serialize(&argument)?.len();
-
-    openings.push(OpeningRecord {
-      eval,
-      eval_blind,
-      eval_commitment,
-      argument,
-    });
-  }
-
-  for ((poly, commitment), opening) in polynomials
-    .iter()
-    .zip(commitments.iter())
-    .zip(openings.iter())
-  {
-    let t0 = Instant::now();
-    let recomputed_eval = evaluate_mle(
-      black_box(&poly.padded_coeffs),
-      black_box(&poly.pcs_opening_point),
-    );
-    totals.verifier_mle_eval += t0.elapsed();
-    if recomputed_eval != opening.eval {
-      return Err(
-        invalid_input(format!(
-          "PCS evaluation mismatch for {}",
-          poly.file.path.display()
-        ))
-        .into(),
-      );
-    }
-
-    let t0 = Instant::now();
-    let recomputed_eval_commitment =
-      E::PCS::commit(&ck_eval, &[recomputed_eval], &opening.eval_blind, false)?;
-    totals.verifier_eval_commit += t0.elapsed();
-    if recomputed_eval_commitment != opening.eval_commitment {
-      return Err(
-        invalid_input(format!(
-          "evaluation commitment mismatch for {}",
-          poly.file.path.display()
-        ))
-        .into(),
-      );
-    }
-
-    let mut transcript = E::TE::new(b"video_pcs_auth_opening");
-    let t0 = Instant::now();
-    E::PCS::verify(
-      &vk,
-      &ck_eval,
-      &mut transcript,
-      &commitment.commitment,
-      &poly.pcs_opening_point,
-      &recomputed_eval_commitment,
-      &opening.argument,
-    )?;
-    totals.verify += t0.elapsed();
-  }
-
-  if config.print_per_channel {
-    print_per_channel(&polynomials);
-  }
-
-  print_summary::<E>(
-    &config,
-    &polynomials,
-    &totals,
-    wall_start.elapsed(),
-    commitment_width,
-    min_coeffs,
-    max_coeffs,
-    min_padded,
-    max_padded,
-    total_commitment_bytes,
-    total_opening_bytes,
-    &circuit_evals,
-    &prover_mle_evals,
-  );
-
-  Ok(())
+  Ok((powers, vk))
 }
 
 fn discover_channel_files(dir: &Path) -> Result<Vec<ChannelFile>, Box<dyn Error>> {
@@ -402,9 +457,7 @@ fn parse_channel_file(path: PathBuf) -> Result<Option<ChannelFile>, Box<dyn Erro
   }))
 }
 
-fn read_channel_polynomial<Scalar: PrimeField>(
-  file: ChannelFile,
-) -> Result<ChannelPolynomial<Scalar>, Box<dyn Error>> {
+fn read_channel_polynomial(file: ChannelFile) -> Result<ChannelPolynomial, Box<dyn Error>> {
   let image = ImageReader::open(&file.path)?.decode()?.into_luma8();
   let (width, height) = image.dimensions();
   if width == 0 || height == 0 {
@@ -422,35 +475,29 @@ fn read_channel_polynomial<Scalar: PrimeField>(
     );
   }
 
-  let mut padded_coeffs = coeffs.clone();
-  padded_coeffs.resize(coeffs.len().next_power_of_two(), Scalar::ZERO);
-
-  let num_vars = padded_coeffs.len().trailing_zeros() as usize;
-  let base_seed = circuit_seed_base(file.frame_index, file.channel);
-  let circuit_challenge =
-    deterministic_scalars(1, base_seed + CIRCUIT_INPUT_CHALLENGE_OFFSET).remove(0);
-  let pcs_opening_point = deterministic_scalars(num_vars, base_seed + PCS_OPENING_POINT_OFFSET);
+  let ark_coeffs_little_endian = coeffs.iter().rev().copied().collect();
+  let polynomial = UniPoly::from_coefficients_vec(ark_coeffs_little_endian);
+  let challenge = deterministic_challenge(circuit_seed_base(file.frame_index, file.channel));
 
   Ok(ChannelPolynomial {
     file,
     width,
     height,
     coeffs,
-    padded_coeffs,
-    circuit_challenge,
-    pcs_opening_point,
+    polynomial,
+    challenge,
   })
 }
 
-fn pack_bytes_as_field_elements<Scalar: PrimeField>(bytes: &[u8]) -> Vec<Scalar> {
-  let byte_base = Scalar::from_u128(1u128 << 8);
+fn pack_bytes_as_field_elements(bytes: &[u8]) -> Vec<Fr> {
+  let byte_base = Fr::from(1u64 << 8);
   bytes
     .chunks(BYTES_PER_FIELD_ELEMENT)
     .map(|chunk| {
-      let mut scalar = Scalar::ZERO;
-      let mut coeff = Scalar::ONE;
+      let mut scalar = Fr::from(0u64);
+      let mut coeff = Fr::from(1u64);
       for &byte in chunk {
-        scalar += coeff * Scalar::from_u128(byte as u128);
+        scalar += coeff * Fr::from(byte as u64);
         coeff *= byte_base;
       }
       scalar
@@ -458,36 +505,16 @@ fn pack_bytes_as_field_elements<Scalar: PrimeField>(bytes: &[u8]) -> Vec<Scalar>
     .collect()
 }
 
-fn evaluate_circuit_horner<Scalar: PrimeField>(coeffs: &[Scalar], point: &Scalar) -> Scalar {
+fn evaluate_circuit_horner(coeffs: &[Fr], point: &Fr) -> Fr {
   let Some((&first, rest)) = coeffs.split_first() else {
-    return Scalar::ZERO;
+    return Fr::from(0u64);
   };
   rest.iter().fold(first, |acc, coeff| acc * point + coeff)
 }
 
-fn evaluate_mle<Scalar: PrimeField>(evals: &[Scalar], point: &[Scalar]) -> Scalar {
-  assert_eq!(evals.len(), 1usize << point.len());
-  let mut work = evals.to_vec();
-  let mut current_len = work.len();
-
-  for r in point {
-    let half = current_len / 2;
-    for i in 0..half {
-      let lo = work[i];
-      let hi = work[half + i];
-      work[i] = lo + *r * (hi - lo);
-    }
-    current_len = half;
-  }
-
-  work[0]
-}
-
-fn deterministic_scalars<Scalar: PrimeField>(length: usize, seed: u64) -> Vec<Scalar> {
-  let mut rng = StdRng::seed_from_u64(seed);
-  (0..length)
-    .map(|_| Scalar::from_u128(rng.gen_range(0..(1u128 << 127))))
-    .collect()
+fn deterministic_challenge(seed_base: u64) -> Fr {
+  let mut rng = StdRng::seed_from_u64(seed_base + CIRCUIT_INPUT_CHALLENGE_OFFSET);
+  Fr::from(rng.gen_range(0..(1u128 << 127)))
 }
 
 fn circuit_seed_base(frame_index: u64, channel: Channel) -> u64 {
@@ -513,16 +540,6 @@ fn optional_env_usize(name: &str) -> Result<Option<usize>, Box<dyn Error>> {
   }
 }
 
-fn env_usize(name: &str, default: usize) -> Result<usize, Box<dyn Error>> {
-  match env::var(name) {
-    Ok(value) if !value.trim().is_empty() => value
-      .parse::<usize>()
-      .map_err(|err| invalid_input(format!("{name} must be a usize, got {value:?}: {err}")).into()),
-    Ok(_) | Err(env::VarError::NotPresent) => Ok(default),
-    Err(err) => Err(err.into()),
-  }
-}
-
 fn env_flag(name: &str) -> bool {
   env::var(name)
     .map(|value| {
@@ -534,82 +551,118 @@ fn env_flag(name: &str) -> bool {
     .unwrap_or(false)
 }
 
-fn print_per_channel<Scalar: PrimeField>(polynomials: &[ChannelPolynomial<Scalar>]) {
+fn print_per_channel(
+  polynomials: &[ChannelPolynomial],
+  commitment_bytes_by_poly: &[usize],
+  opening_proof_bytes_by_poly: &[usize],
+) {
   println!("per_channel");
-  println!("frame,channel,width,height,coeffs,padded_coeffs,path");
-  for poly in polynomials {
+  println!("frame,channel,width,height,coeffs,degree,commitment_bytes,opening_proof_bytes,path");
+  for ((poly, commitment_bytes), opening_proof_bytes) in polynomials
+    .iter()
+    .zip(commitment_bytes_by_poly.iter())
+    .zip(opening_proof_bytes_by_poly.iter())
+  {
     println!(
-      "{},{},{},{},{},{},{}",
+      "{},{},{},{},{},{},{},{},{}",
       poly.file.frame_index,
       poly.file.channel.as_str(),
       poly.width,
       poly.height,
       poly.coeffs.len(),
-      poly.padded_coeffs.len(),
+      poly.polynomial.degree(),
+      commitment_bytes,
+      opening_proof_bytes,
       poly.file.path.display()
     );
   }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn print_summary<E: Engine>(
+fn print_summary(
   config: &BenchmarkConfig,
-  polynomials: &[ChannelPolynomial<E::Scalar>],
+  polynomials: &[ChannelPolynomial],
   totals: &PhaseTotals,
   wall_time: Duration,
-  commitment_width: usize,
+  setup_degree: usize,
   min_coeffs: usize,
   max_coeffs: usize,
-  min_padded: usize,
-  max_padded: usize,
   total_commitment_bytes: usize,
-  total_opening_bytes: usize,
-  circuit_evals: &[E::Scalar],
-  prover_mle_evals: &[E::Scalar],
+  total_opening_proof_bytes: usize,
+  commitment_bytes_by_poly: &[usize],
+  opening_proof_bytes_by_poly: &[usize],
+  horner_evals: &[Fr],
+  pcs_evals: &[Fr],
 ) {
   let n = polynomials.len();
   println!("video_pcs_authentication_benchmark");
-  println!("engine={}", std::any::type_name::<E>());
-  println!("pcs={}", std::any::type_name::<E::PCS>());
+  println!("curve={}", std::any::type_name::<Bls12_381>());
+  println!("pcs={}", std::any::type_name::<Kzg>());
   println!("channel_dir={}", config.channel_dir.display());
   println!("channels={n}");
   println!("rayon_threads={}", rayon::current_num_threads());
-  println!(
-    "commitment_width={} requested_commitment_width={}",
-    commitment_width, config.requested_commitment_width
-  );
+  println!("parallel_verification={}", config.parallel_verification);
+  println!("setup_degree={setup_degree}");
   println!("coefficients_min={min_coeffs} coefficients_max={max_coeffs}");
-  println!("padded_coefficients_min={min_padded} padded_coefficients_max={max_padded}");
   println!("bytes_per_field_element={BYTES_PER_FIELD_ELEMENT}");
   println!("commitment_bytes_total={total_commitment_bytes}");
-  println!("opening_bytes_total={total_opening_bytes}");
-  println!(
-    "circuit_horner_eval_checksum={}",
-    scalar_checksum_prefix(circuit_evals)
+  println!("opening_proof_bytes_total={total_opening_proof_bytes}");
+  print_artifact_bytes_by_channel(
+    polynomials,
+    commitment_bytes_by_poly,
+    opening_proof_bytes_by_poly,
   );
   println!(
-    "pcs_mle_eval_checksum={}",
-    scalar_checksum_prefix(prover_mle_evals)
+    "horner_eval_checksum={}",
+    scalar_checksum_prefix(horner_evals)
   );
-  println!("phase,total_ms,per_channel_ms");
+  println!("pcs_eval_checksum={}", scalar_checksum_prefix(pcs_evals));
+  println!("phase,total,per_channel");
   print_phase("load_and_pack", totals.load_and_pack, n);
   print_phase("setup", totals.setup, n);
-  print_phase("commit_blind", totals.commit_blind, n);
   print_phase("commit", totals.commit, n);
-  print_phase("circuit_horner_eval", totals.circuit_horner_eval, n);
-  print_phase("prover_mle_eval", totals.prover_mle_eval, n);
-  print_phase("eval_blind", totals.eval_blind, n);
-  print_phase("eval_commit", totals.eval_commit, n);
+  print_phase("horner_eval", totals.horner_eval, n);
+  print_phase("pcs_eval", totals.pcs_eval, n);
   print_phase("open", totals.open, n);
-  print_phase("verifier_mle_eval", totals.verifier_mle_eval, n);
-  print_phase("verifier_eval_commit", totals.verifier_eval_commit, n);
-  print_phase("verify", totals.verify, n);
+  print_phase("evaluate_interpolation", totals.evaluate_interpolation, n);
+  print_phase("verify_pcs_openings", totals.verify_pcs_openings, n);
   print_phase("wall", wall_time, n);
+}
+
+fn print_artifact_bytes_by_channel(
+  polynomials: &[ChannelPolynomial],
+  commitment_bytes_by_poly: &[usize],
+  opening_proof_bytes_by_poly: &[usize],
+) {
+  let mut commitment_totals = [0usize; 3];
+  let mut opening_proof_totals = [0usize; 3];
+
+  for ((poly, commitment_bytes), opening_proof_bytes) in polynomials
+    .iter()
+    .zip(commitment_bytes_by_poly.iter())
+    .zip(opening_proof_bytes_by_poly.iter())
+  {
+    let channel_idx = poly.file.channel.sort_index() as usize;
+    commitment_totals[channel_idx] += commitment_bytes;
+    opening_proof_totals[channel_idx] += opening_proof_bytes;
+  }
+
+  println!("artifact_bytes_by_channel");
+  println!("channel,commitment_bytes_total,opening_proof_bytes_total");
+  for channel in [Channel::R, Channel::G, Channel::B] {
+    let channel_idx = channel.sort_index() as usize;
+    println!(
+      "{},{},{}",
+      channel.as_str(),
+      commitment_totals[channel_idx],
+      opening_proof_totals[channel_idx]
+    );
+  }
 }
 
 fn print_phase(name: &str, duration: Duration, channels: usize) {
   println!(
-    "{name},{:.3},{:.3}",
+    "{name},{:.3} ms,{:.3} ms",
     millis(duration),
     millis(duration) / channels as f64
   );
@@ -619,14 +672,22 @@ fn millis(duration: Duration) -> f64 {
   duration.as_secs_f64() * 1_000.0
 }
 
-fn scalar_checksum_prefix<Scalar: PrimeField>(values: &[Scalar]) -> String {
+fn serialized_size<T: CanonicalSerialize>(value: &T) -> usize {
+  value.serialized_size(Compress::Yes)
+}
+
+fn scalar_checksum_prefix(values: &[Fr]) -> String {
   let checksum = values
     .iter()
     .copied()
-    .fold(Scalar::ZERO, |acc, value| acc + value);
-  let repr = checksum.to_repr();
+    .fold(Fr::from(0u64), |acc, value| acc + value);
+  let mut bytes = Vec::new();
+  checksum
+    .serialize_compressed(&mut bytes)
+    .expect("serializing field element into Vec cannot fail");
+
   let mut out = String::new();
-  for byte in repr.as_ref().iter().take(8) {
+  for byte in bytes.iter().take(8) {
     let _ = write!(&mut out, "{byte:02x}");
   }
   out
