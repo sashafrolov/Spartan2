@@ -336,7 +336,8 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
     let (_commit_span, commit_t) = start_span!("commit_witness_shared");
     let (comm_W_shared, r_W_shared) = if S.num_shared_unpadded > 0 {
       let r_W_shared = PCS::<E>::blind(ck, S.num_shared);
-      let comm_W_shared = PCS::<E>::commit(ck, &W[0..S.num_shared], &r_W_shared, is_small)?;
+      let comm_W_shared =
+        PCS::<E>::commit_with_offset(ck, &W[0..S.num_shared], 0, &r_W_shared, is_small)?;
       (Some(comm_W_shared), Some(r_W_shared))
     } else {
       (None, None)
@@ -387,9 +388,10 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
       start_span!("commit_witness_precommitted");
     let (comm_W_precommitted, r_W_precommitted) = if S.num_precommitted_unpadded > 0 {
       let r_W_precommitted = PCS::<E>::blind(ck, S.num_precommitted);
-      let comm_W_precommitted = PCS::<E>::commit(
+      let comm_W_precommitted = PCS::<E>::commit_with_offset(
         ck,
         &ps.W[S.num_shared..S.num_shared + S.num_precommitted],
+        S.num_shared,
         &r_W_precommitted,
         is_small,
       )?;
@@ -467,11 +469,28 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
     let r_W_rest = PCS::<E>::blind(ck, S.num_rest);
     let (comm_W_rest, actual_is_small) = if S.num_rest_unpadded == 0 {
       // Fast path: rest is entirely zero-padding, skip MSM and auto-detect
-      (PCS::<E>::commit_zeros(ck, S.num_rest, &r_W_rest)?, true)
+      (
+        PCS::<E>::commit_zeros_with_offset(
+          ck,
+          S.num_rest,
+          S.num_shared + S.num_precommitted,
+          &r_W_rest,
+        )?,
+        true,
+      )
     } else if is_small {
       let rest_slice =
         &ps.W[S.num_shared + S.num_precommitted..S.num_shared + S.num_precommitted + S.num_rest];
-      (PCS::<E>::commit(ck, rest_slice, &r_W_rest, true)?, true)
+      (
+        PCS::<E>::commit_with_offset(
+          ck,
+          rest_slice,
+          S.num_shared + S.num_precommitted,
+          &r_W_rest,
+          true,
+        )?,
+        true,
+      )
     } else {
       // Only check non-zero portion for small-value detection (zero padding is trivially small)
       let rest_nz = &ps.W[S.num_shared + S.num_precommitted
@@ -483,7 +502,13 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
       let rest_slice =
         &ps.W[S.num_shared + S.num_precommitted..S.num_shared + S.num_precommitted + S.num_rest];
       (
-        PCS::<E>::commit(ck, rest_slice, &r_W_rest, detected_small)?,
+        PCS::<E>::commit_with_offset(
+          ck,
+          rest_slice,
+          S.num_shared + S.num_precommitted,
+          &r_W_rest,
+          detected_small,
+        )?,
         detected_small,
       )
     };
@@ -584,11 +609,28 @@ impl<E: Engine> SatisfyingAssignment<E> {
     let (_commit_rest_span, commit_rest_t) = start_span!("commit_witness_rest");
     let r_W_rest = PCS::<E>::blind(ck, S.num_rest);
     let (comm_W_rest, actual_is_small) = if S.num_rest_unpadded == 0 {
-      (PCS::<E>::commit_zeros(ck, S.num_rest, &r_W_rest)?, true)
+      (
+        PCS::<E>::commit_zeros_with_offset(
+          ck,
+          S.num_rest,
+          S.num_shared + S.num_precommitted,
+          &r_W_rest,
+        )?,
+        true,
+      )
     } else {
       let rest_slice =
         &ps.W[S.num_shared + S.num_precommitted..S.num_shared + S.num_precommitted + S.num_rest];
-      (PCS::<E>::commit(ck, rest_slice, &r_W_rest, false)?, false)
+      (
+        PCS::<E>::commit_with_offset(
+          ck,
+          rest_slice,
+          S.num_shared + S.num_precommitted,
+          &r_W_rest,
+          false,
+        )?,
+        false,
+      )
     };
     info!(elapsed_ms = %commit_rest_t.elapsed().as_millis(), "commit_witness_rest");
     transcript.absorb(b"comm_W_rest", &comm_W_rest);
@@ -890,9 +932,10 @@ impl<E: Engine> MultiRoundSpartanWitness<E> for SatisfyingAssignment<E> {
     // Commit to this round's variables
     let start_padded: usize = s.num_vars_per_round[..round_index].iter().sum();
     let r_w_per_round = PCS::<E>::blind(ck, s.num_vars_per_round[round_index]);
-    let comm_w_round = PCS::<E>::commit(
+    let comm_w_round = PCS::<E>::commit_with_offset(
       ck,
       &state.w[start_padded..start_padded + s.num_vars_per_round[round_index]],
+      start_padded,
       &r_w_per_round,
       false,
     )?;

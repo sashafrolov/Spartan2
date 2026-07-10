@@ -21,7 +21,7 @@ use crate::{
     bn254::types as bn254_types,
     keccak::Keccak256Transcript,
     pasta::{pallas, vesta},
-    pcs::hyrax_pc::HyraxPCS,
+    pcs::{hyrax_pc::HyraxPCS, kzg_pc::KzgPCS},
     pt256::{p256, t256},
   },
   traits::Engine,
@@ -48,6 +48,10 @@ pub struct T256HyraxEngine;
 /// An implementation of the Spartan Engine trait with BN254 curve and Hyrax commitment scheme
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Bn254Engine;
+
+/// An experimental Spartan Engine trait implementation with BN254 and KZG-style commitments
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct Bn254KzgEngine;
 
 impl Engine for PallasHyraxEngine {
   type Base = pallas::Base;
@@ -87,4 +91,12 @@ impl Engine for Bn254Engine {
   type GE = bn254_types::Point;
   type TE = Keccak256Transcript<Self>;
   type PCS = HyraxPCS<Self>;
+}
+
+impl Engine for Bn254KzgEngine {
+  type Base = bn254_types::Base;
+  type Scalar = bn254_types::Scalar;
+  type GE = bn254_types::Point;
+  type TE = Keccak256Transcript<Self>;
+  type PCS = KzgPCS<Self>;
 }

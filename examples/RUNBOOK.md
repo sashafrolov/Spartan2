@@ -4,6 +4,7 @@ I have a "long" and "short" version of each command.
 `curl -o video_data/videos/10stestvideo.mp4 https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_10MB.mp4`
 1b. Download a ~10 minute test video: `curl -o video_data/videos/10mintestvideo.mp4 https://download.blender.org/peach/bigbuckbunny_movies/big_buck_bunny_720p_h264.mov`
 1c. Reencode the test video to be 3600 frames long: `ffmpeg -i video_data/videos/10mintestvideo.mp4 -frames:v 3600 -c:v libx264 video_data/videos/longtestvideo.mp4`. 
+1d. Download a 2^24 Powers of Tau file for HyperKZG testing: `curl -L -C - --fail -o video_data/ppot_0080_24.ptau https://pse-trusted-setup-ppot.s3.eu-central-1.amazonaws.com/pot28_0080/ppot_0080_24.ptau`
 2a. Decompose the input video in various ways. `python3 scripts/setup_videos.py video_data/videos/10stestvideo.mp4 grayscale` (when the edit is `grayscale`).
 2b. `python3 scripts/setup_videos.py video_data/videos/longtestvideo.mp4 grayscale`            
 

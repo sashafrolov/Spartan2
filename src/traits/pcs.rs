@@ -68,6 +68,22 @@ pub trait PCSEngineTrait<E: Engine>: Clone + Send + Sync {
     is_small: bool,
   ) -> Result<Self::Commitment, SpartanError>;
 
+  /// Commits to a slice that occupies `offset..offset + v.len()` in a larger vector.
+  ///
+  /// Most PCS implementations in this crate can ignore the offset because their
+  /// concatenation semantics are represented in the commitment object itself. Schemes
+  /// with a single global SRS, such as HyperKZG, override this so concatenating
+  /// partial commitments is equivalent to committing to the full vector.
+  fn commit_with_offset(
+    ck: &Self::CommitmentKey,
+    v: &[E::Scalar],
+    _offset: usize,
+    r: &Self::Blind,
+    is_small: bool,
+  ) -> Result<Self::Commitment, SpartanError> {
+    Self::commit(ck, v, r, is_small)
+  }
+
   /// Commits to an all-zero vector of size `n` with the given blind.
   /// Default: creates a zero vector and calls `commit`. Implementations may override
   /// for efficiency (e.g., computing only the blind contribution per row).
@@ -78,6 +94,17 @@ pub trait PCSEngineTrait<E: Engine>: Clone + Send + Sync {
   ) -> Result<Self::Commitment, SpartanError> {
     let zeros = vec![E::Scalar::ZERO; n];
     Self::commit(ck, &zeros, r, true)
+  }
+
+  /// Offset-aware variant of `commit_zeros`.
+  fn commit_zeros_with_offset(
+    ck: &Self::CommitmentKey,
+    n: usize,
+    offset: usize,
+    r: &Self::Blind,
+  ) -> Result<Self::Commitment, SpartanError> {
+    let zeros = vec![E::Scalar::ZERO; n];
+    Self::commit_with_offset(ck, &zeros, offset, r, true)
   }
 
   /// Checks if the provided commitment commits to a vector of the specified length

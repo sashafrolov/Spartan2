@@ -23,6 +23,7 @@ rand = "0.8"
 itertools = "0.14.0"
 subtle = "2.5"
 generic-array = "0.14"
+nova-snark = { git = "https://github.com/microsoft/Nova", rev = "666e3b25bfb9f8b2106f8b4d8057010f28b1ee79", default-features = false, features = ["io"] }
 num-bigint = { version = "0.4", features = ["serde", "rand"] }
 num-traits = "0.2"
 num-integer = "0.1"
