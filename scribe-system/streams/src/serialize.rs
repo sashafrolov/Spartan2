@@ -406,6 +406,10 @@ macro_rules! impl_halo2_field {
 impl_halo2_field!(halo2curves::secp256r1::Fp);
 #[cfg(feature = "halo2")]
 impl_halo2_field!(halo2curves::secp256r1::Fq);
+#[cfg(feature = "halo2")]
+impl_halo2_field!(halo2curves::bn256::Fq);
+#[cfg(feature = "halo2")]
+impl_halo2_field!(halo2curves::bn256::Fr);
 
 impl<P: SWCurveConfig> SerializeRaw for SWAffine<P>
 where

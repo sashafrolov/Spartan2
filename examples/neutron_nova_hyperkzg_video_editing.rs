@@ -3,7 +3,7 @@
 // HyperKZG engine instead of T256 Hyrax.
 //
 // Run with:
-//   RUST_LOG=neutronnova_hyperkzg_video_editing=info,spartan2::neutronnova_zk_ram_optimized=info RUSTFLAGS="-C target-cpu=native" cargo run --example neutronnova_hyperkzg_video_editing --release
+//   RUST_LOG=neutron_nova_hyperkzg_video_editing=info,spartan2::neutronnova_zk_ram_optimized=info RUSTFLAGS="-C target-cpu=native" cargo run --example neutron_nova_hyperkzg_video_editing --release
 // Optionally override the Powers-of-Tau file:
 //   SPARTAN2_HYPERKZG_PTAU=video_data/ppot_0080_24.ptau
 // The RUST_LOG is because the Spartan library has a bunch of unnecessary print statements for large
@@ -126,11 +126,16 @@ fn main() {
   let t0 = Instant::now();
   let result = snark.verify(&vk, num_circuits).unwrap();
   let verify_ms = t0.elapsed().as_millis();
-  let (public_values_step, _public_values_core): (Vec<_>, Vec<_>) = result;
+  let (public_values_step, public_values_core): (Vec<_>, Vec<_>) = result;
   info!(elapsed_ms = verify_ms, "verify");
 
   let snark_bytes = bincode::serialize(&snark).unwrap().len();
   info!(bytes = snark_bytes, "snark_size");
+  let public_values_bytes =
+    bincode::serialize(&(public_values_step.as_slice(), public_values_core.as_slice()))
+      .unwrap()
+      .len();
+  info!(bytes = public_values_bytes, "public_values_size");
 
   info!(
     num_step_circuits = public_values_step.len(),
