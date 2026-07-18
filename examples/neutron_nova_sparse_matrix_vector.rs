@@ -22,7 +22,7 @@ use sparse_matrix_vector_product_circuit::{
 use spartan2::{
   bellpepper::{r1cs::SpartanShape, shape_cs::ShapeCS},
   neutronnova_zk_ram_optimized::NeutronNovaZkSNARK,
-  provider::T256HyraxEngine,
+  provider::Bn254KzgEngine,
   traits::Engine,
 };
 use tracing::{info, info_span};
@@ -91,7 +91,7 @@ fn main() {
     .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
     .try_init();
 
-  type E = T256HyraxEngine;
+  type E = Bn254KzgEngine;
   type Scalar = <E as Engine>::Scalar;
 
   assert!(NUM_CIRCUITS > 0);

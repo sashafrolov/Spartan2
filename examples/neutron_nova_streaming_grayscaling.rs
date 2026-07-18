@@ -15,7 +15,7 @@ use rayon::prelude::*;
 use spartan2::{
   bellpepper::{r1cs::SpartanShape, shape_cs::ShapeCS},
   neutronnova_zk_streaming::NeutronNovaZkSNARK,
-  provider::T256HyraxEngine,
+  provider::Bn254KzgEngine,
   traits::Engine,
 };
 use std::{env, time::Instant};
@@ -31,7 +31,7 @@ fn main() {
     .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
     .try_init();
 
-  type E = T256HyraxEngine;
+  type E = Bn254KzgEngine;
 
   let frame_path_format = env::var("FRAME_PATH_FORMAT")
     .unwrap_or_else(|_| "video_data/decomposed_frames/frame_{}.png".to_string());

@@ -1,10 +1,11 @@
-// NeutronNova video editing with the non streaming version. Fold a bunch of keyframe proofs together.
-// This is meant to give a baseline of the best possible throughput (generally for 128 instances on a 256 GB machine)
-// attainable from just using RAM. This is the best you can do if you care a little less about succinctness.
-// We ended up finding a bunch of optimizations to neutronnova_zk.rs as well, so this had to be made.
+// NeutronNova video editing with the non-streaming version and BN254 HyperKZG commitments.
+// This is the default PCS example; the T256 Hyrax counterpart is
+// neutron_nova_hyrax_video_editing.rs.
 //
 // Run with:
 //   RUST_LOG=neutron_nova_video_editing=info,spartan2::neutronnova_zk_ram_optimized=info RUSTFLAGS="-C target-cpu=native" cargo run --example neutron_nova_video_editing --release
+// Optionally override the Powers-of-Tau file:
+//   SPARTAN2_HYPERKZG_PTAU=video_data/ppot_0080_24.ptau
 // The RUST_LOG is because the Spartan library has a bunch of unnecessary print statements for large
 // circuits internally.
 
@@ -20,16 +21,21 @@ use rayon::prelude::*;
 use spartan2::{
   bellpepper::{r1cs::SpartanShape, shape_cs::ShapeCS},
   neutronnova_zk_ram_optimized::NeutronNovaZkSNARK,
-  provider::T256HyraxEngine,
+  provider::Bn254KzgEngine,
   traits::Engine,
 };
-use std::time::Instant;
+use std::{env, time::Instant};
 use tracing::{info, info_span};
 
-const KERNEL_SIZE: usize = 9;
-const RADIUS: usize = KERNEL_SIZE / 2;
-const NUM_CIRCUITS: usize = 4;
-const IMAGE_DIMS: (usize, usize) = (1280, 720);
+const DEFAULT_NUM_CIRCUITS: usize = 4;
+const DEFAULT_IMAGE_DIMS: (usize, usize) = (1280, 720);
+
+fn parse_usize_env(name: &str, default: usize) -> usize {
+  env::var(name)
+    .ok()
+    .and_then(|value| value.parse().ok())
+    .unwrap_or(default)
+}
 
 fn main() {
   let _ = tracing_subscriber::fmt()
@@ -38,25 +44,31 @@ fn main() {
     .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
     .try_init();
 
-  type E = T256HyraxEngine;
+  type E = Bn254KzgEngine;
+
+  let num_circuits = parse_usize_env("NN_HYPERKZG_NUM_CIRCUITS", DEFAULT_NUM_CIRCUITS);
+  let image_dims = (
+    parse_usize_env("NN_HYPERKZG_IMAGE_HEIGHT", DEFAULT_IMAGE_DIMS.0),
+    parse_usize_env("NN_HYPERKZG_IMAGE_WIDTH", DEFAULT_IMAGE_DIMS.1),
+  );
 
   let root_span = info_span!(
     "bench",
-    num_circuits = NUM_CIRCUITS,
-    image_height = IMAGE_DIMS.0,
-    image_width = IMAGE_DIMS.1,
+    num_circuits,
+    image_height = image_dims.0,
+    image_width = image_dims.1,
   )
   .entered();
   info!(
-    num_circuits = NUM_CIRCUITS,
-    image_height = IMAGE_DIMS.0,
-    image_width = IMAGE_DIMS.1,
-    "starting NeutronNova video editing benchmark"
+    num_circuits,
+    image_height = image_dims.0,
+    image_width = image_dims.1,
+    "starting NeutronNova HyperKZG video editing benchmark"
   );
 
   // Use a dummy circuit of the right shape to derive the R1CS constraints and keys.
   let shape_circuit =
-    ExampleVideoEditCircuit::<<E as Engine>::Scalar>::new(generate_random_image(IMAGE_DIMS, 0), 0);
+    ExampleVideoEditCircuit::<<E as Engine>::Scalar>::new(generate_random_image(image_dims, 0), 0);
   let [
     num_cons_unpadded,
     num_shared_unpadded,
@@ -87,18 +99,18 @@ fn main() {
 
   let t0 = Instant::now();
   let (pk, vk) =
-    NeutronNovaZkSNARK::<E>::setup(&shape_circuit, &DummyCircuit::<E>::default(), NUM_CIRCUITS)
+    NeutronNovaZkSNARK::<E>::setup(&shape_circuit, &DummyCircuit::<E>::default(), num_circuits)
       .unwrap();
   let setup_ms = t0.elapsed().as_millis();
   info!(elapsed_ms = setup_ms, "setup");
 
   // Build the step circuits — each represents one video frame.
   let t0 = Instant::now();
-  let step_circuits: Vec<ExampleVideoEditCircuit<<E as Engine>::Scalar>> = (0..NUM_CIRCUITS)
+  let step_circuits: Vec<ExampleVideoEditCircuit<<E as Engine>::Scalar>> = (0..num_circuits)
     .into_par_iter()
     .map(|i| {
       ExampleVideoEditCircuit::<<E as Engine>::Scalar>::new(
-        generate_random_image(IMAGE_DIMS, i as u64),
+        generate_random_image(image_dims, i as u64),
         i as u64,
       )
     })
@@ -112,13 +124,18 @@ fn main() {
   info!(elapsed_ms = t0.elapsed().as_millis(), "prove");
 
   let t0 = Instant::now();
-  let result = snark.verify(&vk, NUM_CIRCUITS).unwrap();
+  let result = snark.verify(&vk, num_circuits).unwrap();
   let verify_ms = t0.elapsed().as_millis();
-  let (public_values_step, _public_values_core): (Vec<_>, Vec<_>) = result;
+  let (public_values_step, public_values_core): (Vec<_>, Vec<_>) = result;
   info!(elapsed_ms = verify_ms, "verify");
 
   let snark_bytes = bincode::serialize(&snark).unwrap().len();
   info!(bytes = snark_bytes, "snark_size");
+  let public_values_bytes =
+    bincode::serialize(&(public_values_step.as_slice(), public_values_core.as_slice()))
+      .unwrap()
+      .len();
+  info!(bytes = public_values_bytes, "public_values_size");
 
   info!(
     num_step_circuits = public_values_step.len(),

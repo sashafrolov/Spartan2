@@ -15,7 +15,7 @@ use resizing_circuit::ResizingCircuit;
 use spartan2::{
   bellpepper::{r1cs::SpartanShape, shape_cs::ShapeCS},
   neutronnova_zk_ram_optimized::NeutronNovaZkSNARK,
-  provider::T256HyraxEngine,
+  provider::Bn254KzgEngine,
   traits::Engine,
 };
 use std::{env, time::Instant};
@@ -33,7 +33,7 @@ fn main() {
     .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
     .try_init();
 
-  type E = T256HyraxEngine;
+  type E = Bn254KzgEngine;
 
   let channel_path_format = env::var("CHANNEL_PATH_FORMAT")
     .unwrap_or_else(|_| "video_data/decomposed_frame_channels/{channel}_{}.png".to_string());
