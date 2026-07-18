@@ -242,7 +242,14 @@ impl KzgCommitment {
 
 impl PartialEq for KzgCommitment {
   fn eq(&self, other: &Self) -> bool {
-    self.comm == other.comm && self.len == other.len
+    // Compare every field, including `shifted_comm`. This is the group element
+    // that `combine_commitments`/`fold_commitments` actually verify openings
+    // against, so two commitments that agree on `comm` but differ on
+    // `shifted_comm` are NOT interchangeable and must not compare equal.
+    self.comm == other.comm
+      && self.shifted_comm == other.shifted_comm
+      && self.offset == other.offset
+      && self.len == other.len
   }
 }
 
@@ -701,16 +708,40 @@ impl FoldingEngineTrait<Bn254KzgEngine> for KzgPCS<Bn254KzgEngine> {
   }
 }
 
+/// Appends the affine coordinates of a group element to `bytes` in the same
+/// encoding used for the unshifted commitment point.
+fn append_point_bytes(bytes: &mut Vec<u8>, point: <Bn254KzgEngine as Engine>::GE) {
+  let (x, y, is_infinity) = point.to_coordinates();
+  bytes.extend(<_ as TranscriptReprTrait<<Bn254KzgEngine as Engine>::GE>>::to_transcript_bytes(&x));
+  bytes.extend(<_ as TranscriptReprTrait<<Bn254KzgEngine as Engine>::GE>>::to_transcript_bytes(&y));
+  bytes.push(u8::from(is_infinity));
+}
+
 impl TranscriptReprTrait<<Bn254KzgEngine as Engine>::GE> for KzgCommitment {
   fn to_transcript_bytes(&self) -> Vec<u8> {
-    let (x, y, is_infinity) = self.into_inner().to_coordinates();
     let mut bytes = b"hyperkzg_commitment".to_vec();
     bytes.extend_from_slice(&(self.len as u64).to_le_bytes());
-    bytes
-      .extend(<_ as TranscriptReprTrait<<Bn254KzgEngine as Engine>::GE>>::to_transcript_bytes(&x));
-    bytes
-      .extend(<_ as TranscriptReprTrait<<Bn254KzgEngine as Engine>::GE>>::to_transcript_bytes(&y));
-    bytes.push(u8::from(is_infinity));
+    // `offset` participates in `combine_commitments`' contiguity check, so bind
+    // it too rather than leaving it as a free, post-challenge prover choice.
+    bytes.extend_from_slice(&(self.offset as u64).to_le_bytes());
+
+    // Bind the unshifted commitment point.
+    append_point_bytes(&mut bytes, self.comm.into_inner());
+
+    // Bind the shifted commitment point. This is the group element that
+    // `combine_commitments` and the folding paths verify HyperKZG openings
+    // against, so it MUST be absorbed into the transcript before any Fiat-Shamir
+    // challenge is derived. Absorbing only `comm` (as this impl previously did)
+    // left `shifted_comm` as an unbound value the prover could choose after
+    // seeing the challenges, which breaks binding. A presence byte keeps `None`
+    // unambiguously distinct from any actual point value.
+    match self.shifted_comm {
+      Some(shifted) => {
+        bytes.push(1u8);
+        append_point_bytes(&mut bytes, shifted.into_inner());
+      }
+      None => bytes.push(0u8),
+    }
     bytes
   }
 }
