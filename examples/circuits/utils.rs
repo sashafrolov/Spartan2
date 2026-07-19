@@ -271,8 +271,11 @@ fn gaussian_kernel1d(sigma: f64, radius: i32) -> Vec<f64> {
   phi_x
 }
 
-fn gaussian_kernel1d_fixed_point<F: PrimeField>(sigma: f64, radius: i32) -> Vec<F> {
-  let fp_kernel = gaussian_kernel1d(sigma, radius);
+pub fn create_gblur_kernel<F: PrimeField>(sigma: f64, radius: usize) -> Vec<F> {
+  assert!(radius > 0, "Kernel radius must be positive");
+  assert!(sigma > 0.0, "Sigma must be positive");
+
+  let fp_kernel = gaussian_kernel1d(sigma, radius as i32);
   fp_kernel
     .iter()
     .map(|&x| F::from((x * KERNEL_SCALE as f64) as u64))
@@ -285,7 +288,7 @@ pub fn create_gblur_matrix<F: PrimeField>(size: usize, sigma: f64, radius: usize
   assert!(sigma > 0.0, "Sigma must be positive");
 
   let mut matrix = vec![vec![F::ZERO; size]; size];
-  let kernel: Vec<F> = gaussian_kernel1d_fixed_point(sigma, radius as i32);
+  let kernel: Vec<F> = create_gblur_kernel(sigma, radius);
   let kernel_len = kernel.len();
   assert_eq!(kernel_len, 2 * radius + 1, "Kernel length mismatch");
 

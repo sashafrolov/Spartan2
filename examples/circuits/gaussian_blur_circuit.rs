@@ -3,9 +3,8 @@
 #[path = "utils.rs"]
 mod utils;
 use utils::{
-  GBLUR_RADIUS, SIGMA, create_gblur_matrix, create_gblur_matrix_u64,
-  matrix_matrix_product_band_left_u64, matrix_matrix_product_band_right_u64, matrix_vector_product,
-  read_mono_png, vector_matrix_product,
+  GBLUR_RADIUS, SIGMA, create_gblur_kernel, create_gblur_matrix_u64,
+  matrix_matrix_product_band_left_u64, matrix_matrix_product_band_right_u64, read_mono_png,
 };
 
 use bellpepper_core::{ConstraintSystem, LinearCombination, SynthesisError, num::AllocatedNum};
@@ -33,6 +32,71 @@ pub fn generate_random_image(dimensions: (usize, usize), seed: u64) -> Vec<Vec<u
     .collect()
 }
 
+#[derive(Clone, Copy)]
+enum GBlurProduct {
+  MatrixVector,
+  VectorMatrix,
+}
+
+/// Allocates one output variable per entry and binds it to a sparse, banded
+/// Gaussian matrix-vector product with a single wide linear constraint.
+fn allocate_gblur_product<Scalar, CS>(
+  cs: &mut CS,
+  input_vars: &[AllocatedNum<Scalar>],
+  input_values: &[Scalar],
+  kernel: &[Scalar],
+  product: GBlurProduct,
+) -> Result<(Vec<AllocatedNum<Scalar>>, Vec<Scalar>), SynthesisError>
+where
+  Scalar: PrimeField,
+  CS: ConstraintSystem<Scalar>,
+{
+  assert_eq!(input_vars.len(), input_values.len());
+  assert!(!kernel.is_empty());
+  assert_eq!(kernel.len() % 2, 1, "Gaussian kernel length must be odd");
+
+  let size = input_vars.len();
+  let radius = kernel.len() / 2;
+  let mut output_vars = Vec::with_capacity(size);
+  let mut output_values = Vec::with_capacity(size);
+
+  for output_index in 0..size {
+    let input_start = output_index.saturating_sub(radius);
+    let input_end = output_index
+      .saturating_add(radius)
+      .saturating_add(1)
+      .min(size);
+    let mut output_value = Scalar::ZERO;
+    let mut output_lc = LinearCombination::zero();
+
+    for input_index in input_start..input_end {
+      let kernel_index = match product {
+        // A[row, col] = kernel[radius + col - row].
+        GBlurProduct::MatrixVector => radius + input_index - output_index,
+        GBlurProduct::VectorMatrix => radius + output_index - input_index,
+      };
+      let coefficient = kernel[kernel_index];
+      output_value += coefficient * input_values[input_index];
+      output_lc = output_lc + (coefficient, input_vars[input_index].get_variable());
+    }
+
+    let output_var = AllocatedNum::alloc(cs.namespace(|| format!("entry {output_index}")), || {
+      Ok(output_value)
+    })?;
+    cs.enforce(
+      || format!("computation {output_index}"),
+      |lc| lc + &output_lc,
+      |lc| lc + CS::one(),
+      |lc| lc + output_var.get_variable(),
+    );
+
+    output_vars.push(output_var);
+    output_values.push(output_value);
+  }
+
+  Ok((output_vars, output_values))
+}
+
 #[derive(Clone, Debug)]
 pub struct GaussianBlurCircuit<Scalar: PrimeField> {
   image: Vec<Vec<u8>>,
@@ -46,8 +110,6 @@ pub struct GaussianBlurCircuit<Scalar: PrimeField> {
   output_polynomial_interpolation_challenge: Scalar,
   public_input_poly_eval: Scalar,
   public_output_poly_eval: Scalar,
-  rTA: Vec<Scalar>,
-  As: Vec<Scalar>,
   pub convolution_result: Vec<Vec<u64>>,
 }
 
@@ -139,11 +201,6 @@ impl<Scalar: PrimeField + PrimeFieldBits> GaussianBlurCircuit<Scalar> {
       });
     let target_image = edited_image.clone();
 
-    let gblur_v_f: Vec<Vec<Scalar>> = create_gblur_matrix(height, SIGMA, GBLUR_RADIUS);
-    let gblur_h_f: Vec<Vec<Scalar>> = create_gblur_matrix(width, SIGMA, GBLUR_RADIUS);
-    let rTA = vector_matrix_product(&r, &gblur_v_f);
-    let As = matrix_vector_product(&gblur_h_f, &s);
-
     Self {
       image,
       edited_image,
@@ -156,8 +213,6 @@ impl<Scalar: PrimeField + PrimeFieldBits> GaussianBlurCircuit<Scalar> {
       output_polynomial_interpolation_challenge,
       public_input_poly_eval,
       public_output_poly_eval,
-      rTA,
-      As,
       convolution_result,
     }
   }
@@ -174,8 +229,6 @@ impl<E: Engine> SpartanCircuit<E> for GaussianBlurCircuit<E::Scalar> {
 
     public_vals.extend(self.r.clone());
     public_vals.extend(self.s.clone());
-    public_vals.extend(self.rTA.clone());
-    public_vals.extend(self.As.clone());
     public_vals.push(self.logup_challenge_1);
     public_vals.push(self.logup_challenge_2);
     public_vals.push(self.input_polynomial_interpolation_challenge);
@@ -284,17 +337,24 @@ impl<E: Engine> SpartanCircuit<E> for GaussianBlurCircuit<E::Scalar> {
       allocated_s.push(n);
     }
 
-    let mut allocated_rTA = Vec::new();
-    for (i, val) in self.rTA.clone().into_iter().enumerate() {
-      let n = AllocatedNum::alloc_input(cs.namespace(|| format!("rTA entry {i}")), || Ok(val))?;
-      allocated_rTA.push(n);
-    }
-
-    let mut allocated_As = Vec::new();
-    for (i, val) in self.As.clone().into_iter().enumerate() {
-      let n = AllocatedNum::alloc_input(cs.namespace(|| format!("As entry {i}")), || Ok(val))?;
-      allocated_As.push(n);
-    }
+    // A has only 2 * GBLUR_RADIUS + 1 nonzero diagonals. Materialize r^T A
+    // and A s once so the later nonlinear products use a single variable,
+    // while binding every entry with one wide linear constraint.
+    let gblur_kernel: Vec<E::Scalar> = create_gblur_kernel(SIGMA, GBLUR_RADIUS);
+    let (allocated_rTA, rTA_values) = allocate_gblur_product(
+      &mut cs.namespace(|| "compute rTA"),
+      &allocated_r,
+      &self.r,
+      &gblur_kernel,
+      GBlurProduct::VectorMatrix,
+    )?;
+    let (allocated_As, As_values) = allocate_gblur_product(
+      &mut cs.namespace(|| "compute As"),
+      &allocated_s,
+      &self.s,
+      &gblur_kernel,
+      GBlurProduct::MatrixVector,
+    )?;
 
     // 3. Compute LHS convolution (r^TA)I(As).
     let mut IAs = Vec::new();
@@ -304,7 +364,7 @@ impl<E: Engine> SpartanCircuit<E> for GaussianBlurCircuit<E::Scalar> {
       let mut running_sum = E::Scalar::ZERO;
 
       for ((j, x), y) in row.iter().enumerate().zip(allocated_As.iter()) {
-        running_sum = running_sum + E::Scalar::from_u128(self.image[i][j] as u128) * self.As[j];
+        running_sum = running_sum + E::Scalar::from_u128(self.image[i][j] as u128) * As_values[j];
 
         let partial_sum_var = AllocatedNum::alloc(
           cs.namespace(|| format!("Row {i} IAs partial sum {j}")),
@@ -337,7 +397,7 @@ impl<E: Engine> SpartanCircuit<E> for GaussianBlurCircuit<E::Scalar> {
     let mut lhs_partial_sums: Vec<AllocatedNum<E::Scalar>> = Vec::new();
     let mut lhs_running_sum = E::Scalar::ZERO;
     for (i, (x, y)) in IAs.iter().zip(allocated_rTA.iter()).enumerate() {
-      lhs_running_sum = lhs_running_sum + self.rTA[i] * IAs_felts[i];
+      lhs_running_sum = lhs_running_sum + rTA_values[i] * IAs_felts[i];
       let partial_sum_var =
         AllocatedNum::alloc(cs.namespace(|| format!("LHS partial sum {i}")), || {
           Ok(lhs_running_sum)
@@ -899,5 +959,264 @@ impl<E: Engine> SpartanCircuit<E> for GaussianBlurCircuit<E::Scalar> {
     );
 
     Ok(())
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use bellpepper_core::test_cs::TestConstraintSystem;
+  use spartan2::{
+    provider::T256HyraxEngine,
+    traits::{Engine, circuit::SpartanCircuit},
+  };
+
+  type E = T256HyraxEngine;
+  type Scalar = <E as Engine>::Scalar;
+
+  fn scalar(value: u64) -> Scalar {
+    Scalar::from_u128(value as u128)
+  }
+
+  fn allocate_public_vector(
+    cs: &mut TestConstraintSystem<Scalar>,
+    label: &str,
+    values: &[Scalar],
+  ) -> Vec<AllocatedNum<Scalar>> {
+    values
+      .iter()
+      .enumerate()
+      .map(|(index, &value)| {
+        AllocatedNum::alloc_input(cs.namespace(|| format!("{label} {index}")), || Ok(value))
+          .unwrap()
+      })
+      .collect()
+  }
+
+  fn polynomial_evaluation(bytes: &[u8], challenge: Scalar) -> Scalar {
+    let packed: Vec<Scalar> = bytes
+      .chunks(BYTES_PER_FIELD_ELEMENT)
+      .map(|chunk| {
+        chunk
+          .iter()
+          .fold((Scalar::ZERO, Scalar::ONE), |(value, coefficient), byte| {
+            (
+              value + coefficient * scalar(*byte as u64),
+              coefficient * scalar(1 << 8),
+            )
+          })
+          .0
+      })
+      .collect();
+    packed.iter().skip(1).fold(packed[0], |evaluation, value| {
+      evaluation * challenge + value
+    })
+  }
+
+  fn small_valid_circuit() -> GaussianBlurCircuit<Scalar> {
+    use super::utils::{
+      create_gblur_matrix_u64, matrix_matrix_product_band_left_u64,
+      matrix_matrix_product_band_right_u64,
+    };
+
+    let image = vec![vec![1, 2, 3], vec![4, 5, 6]];
+    let image_u64: Vec<Vec<u64>> = image
+      .iter()
+      .map(|row| row.iter().map(|&pixel| pixel as u64).collect())
+      .collect();
+    let vertical = create_gblur_matrix_u64(image.len(), SIGMA, GBLUR_RADIUS);
+    let horizontal = create_gblur_matrix_u64(image[0].len(), SIGMA, GBLUR_RADIUS);
+    let row_wise = matrix_matrix_product_band_left_u64(&vertical, &image_u64, GBLUR_RADIUS);
+    let convolution_result =
+      matrix_matrix_product_band_right_u64(&row_wise, &horizontal, GBLUR_RADIUS);
+    let edited_image: Vec<Vec<u8>> = convolution_result
+      .iter()
+      .map(|row| row.iter().map(|value| (value >> 32) as u8).collect())
+      .collect();
+    let input_challenge = scalar(37);
+    let output_challenge = scalar(41);
+
+    GaussianBlurCircuit {
+      public_input_poly_eval: polynomial_evaluation(
+        &image.iter().flatten().copied().collect::<Vec<_>>(),
+        input_challenge,
+      ),
+      public_output_poly_eval: polynomial_evaluation(
+        &edited_image.iter().flatten().copied().collect::<Vec<_>>(),
+        output_challenge,
+      ),
+      target_image: edited_image.clone(),
+      image,
+      edited_image,
+      r: vec![scalar(11), scalar(13)],
+      s: vec![scalar(17), scalar(19), scalar(23)],
+      logup_challenge_1: scalar(1_000_000),
+      logup_challenge_2: scalar(2_000_000),
+      input_polynomial_interpolation_challenge: input_challenge,
+      output_polynomial_interpolation_challenge: output_challenge,
+      convolution_result,
+    }
+  }
+
+  #[test]
+  fn sparse_products_match_dense_references_and_are_constrained() {
+    use super::utils::{create_gblur_matrix, matrix_vector_product, vector_matrix_product};
+
+    // Exercise both an interior band and the clipped boundary behavior, as
+    // well as a dimension smaller than the Gaussian radius.
+    let r: Vec<Scalar> = (0..67).map(|i| scalar(3 * i + 1)).collect();
+    let s: Vec<Scalar> = (0..17).map(|i| scalar(5 * i + 2)).collect();
+    let kernel = create_gblur_kernel(SIGMA, GBLUR_RADIUS);
+
+    let vertical = create_gblur_matrix(r.len(), SIGMA, GBLUR_RADIUS);
+    let horizontal = create_gblur_matrix(s.len(), SIGMA, GBLUR_RADIUS);
+    let expected_rTA = vector_matrix_product(&r, &vertical);
+    let expected_As = matrix_vector_product(&horizontal, &s);
+
+    let mut cs = TestConstraintSystem::new();
+    let allocated_r = allocate_public_vector(&mut cs, "r", &r);
+    let allocated_s = allocate_public_vector(&mut cs, "s", &s);
+    let (allocated_rTA, rTA_values) = allocate_gblur_product(
+      &mut cs.namespace(|| "compute rTA"),
+      &allocated_r,
+      &r,
+      &kernel,
+      GBlurProduct::VectorMatrix,
+    )
+    .unwrap();
+    let (allocated_As, As_values) = allocate_gblur_product(
+      &mut cs.namespace(|| "compute As"),
+      &allocated_s,
+      &s,
+      &kernel,
+      GBlurProduct::MatrixVector,
+    )
+    .unwrap();
+
+    assert_eq!(rTA_values, expected_rTA);
+    assert_eq!(As_values, expected_As);
+    assert_eq!(
+      allocated_rTA
+        .iter()
+        .map(|value| value.get_value().unwrap())
+        .collect::<Vec<_>>(),
+      expected_rTA,
+    );
+    assert_eq!(
+      allocated_As
+        .iter()
+        .map(|value| value.get_value().unwrap())
+        .collect::<Vec<_>>(),
+      expected_As,
+    );
+    assert_eq!(cs.num_constraints(), r.len() + s.len());
+    assert!(cs.is_satisfied());
+
+    // Neither derived vector can be changed independently of its public
+    // challenge vector.
+    let rTA_path = "compute rTA/entry 0/num";
+    let correct_rTA = cs.get(rTA_path);
+    cs.set(rTA_path, correct_rTA + Scalar::ONE);
+    assert_eq!(cs.which_is_unsatisfied(), Some("compute rTA/computation 0"));
+    cs.set(rTA_path, correct_rTA);
+    assert!(cs.is_satisfied());
+
+    let As_path = "compute As/entry 0/num";
+    let correct_As = cs.get(As_path);
+    cs.set(As_path, correct_As + Scalar::ONE);
+    assert_eq!(cs.which_is_unsatisfied(), Some("compute As/computation 0"));
+  }
+
+  #[test]
+  fn product_orientations_do_not_assume_a_symmetric_kernel() {
+    use super::utils::{matrix_vector_product, vector_matrix_product};
+
+    let values = vec![scalar(7), scalar(11), scalar(13), scalar(17)];
+    let kernel = vec![scalar(2), scalar(3), scalar(5)];
+    let matrix = vec![
+      vec![scalar(3), scalar(5), Scalar::ZERO, Scalar::ZERO],
+      vec![scalar(2), scalar(3), scalar(5), Scalar::ZERO],
+      vec![Scalar::ZERO, scalar(2), scalar(3), scalar(5)],
+      vec![Scalar::ZERO, Scalar::ZERO, scalar(2), scalar(3)],
+    ];
+    let expected_vector_matrix = vector_matrix_product(&values, &matrix);
+    let expected_matrix_vector = matrix_vector_product(&matrix, &values);
+
+    let mut cs = TestConstraintSystem::new();
+    let allocated_values = allocate_public_vector(&mut cs, "input", &values);
+    let (_, vector_matrix_values) = allocate_gblur_product(
+      &mut cs.namespace(|| "vector matrix"),
+      &allocated_values,
+      &values,
+      &kernel,
+      GBlurProduct::VectorMatrix,
+    )
+    .unwrap();
+    let (_, matrix_vector_values) = allocate_gblur_product(
+      &mut cs.namespace(|| "matrix vector"),
+      &allocated_values,
+      &values,
+      &kernel,
+      GBlurProduct::MatrixVector,
+    )
+    .unwrap();
+
+    assert_eq!(vector_matrix_values, expected_vector_matrix);
+    assert_eq!(matrix_vector_values, expected_matrix_vector);
+    assert_eq!(cs.num_constraints(), 2 * values.len());
+    assert!(cs.is_satisfied());
+  }
+
+  #[test]
+  fn public_values_omit_derived_products() {
+    let circuit = small_valid_circuit();
+
+    let public_values =
+      <GaussianBlurCircuit<Scalar> as SpartanCircuit<E>>::public_values(&circuit).unwrap();
+    assert_eq!(
+      public_values,
+      vec![
+        scalar(11),
+        scalar(13),
+        scalar(17),
+        scalar(19),
+        scalar(23),
+        scalar(1_000_000),
+        scalar(2_000_000),
+        scalar(37),
+        circuit.public_input_poly_eval,
+        scalar(41),
+        circuit.public_output_poly_eval,
+      ],
+    );
+    assert_eq!(public_values.len(), circuit.r.len() + circuit.s.len() + 6);
+  }
+
+  #[test]
+  fn complete_circuit_is_satisfied_with_derived_products() {
+    let circuit = small_valid_circuit();
+    let expected_public_values =
+      <GaussianBlurCircuit<Scalar> as SpartanCircuit<E>>::public_values(&circuit).unwrap();
+    let mut cs = TestConstraintSystem::new();
+    <GaussianBlurCircuit<Scalar> as SpartanCircuit<E>>::synthesize(
+      &circuit,
+      &mut cs,
+      &[],
+      &[],
+      Some(&[]),
+    )
+    .unwrap();
+
+    assert!(cs.is_satisfied());
+    assert!(cs.verify(&expected_public_values));
+    let height = circuit.image.len();
+    let width = circuit.image[0].len();
+    let pixels = height * width;
+    let constraints_before_derived_products =
+      7 * pixels + 2 * height + 2 * pixels.div_ceil(BYTES_PER_FIELD_ELEMENT) + 65_797;
+    assert_eq!(
+      cs.num_constraints(),
+      constraints_before_derived_products + height + width,
+    );
   }
 }

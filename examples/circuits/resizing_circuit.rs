@@ -3,8 +3,8 @@
 #[path = "utils.rs"]
 mod utils;
 use utils::{
-  create_resizing_matrix, create_resizing_sparse, dense_sparse_matmul_u64, matrix_vector_product,
-  read_mono_png, sparse_dense_matmul_u64, vector_matrix_product,
+  SparseMatrix, create_resizing_sparse, dense_sparse_matmul_u64, read_mono_png,
+  sparse_dense_matmul_u64,
 };
 
 use bellpepper_core::{ConstraintSystem, LinearCombination, SynthesisError, num::AllocatedNum};
@@ -32,6 +32,75 @@ pub fn generate_random_image(dimensions: (usize, usize), seed: u64) -> Vec<Vec<u
     .collect()
 }
 
+#[derive(Clone, Copy)]
+enum ResizeProduct {
+  MatrixVector,
+  VectorMatrix,
+}
+
+/// Allocates one output variable per entry and binds it to a sparse resizing
+/// matrix product with a single wide linear constraint.
+fn allocate_resize_product<Scalar, CS>(
+  cs: &mut CS,
+  input_vars: &[AllocatedNum<Scalar>],
+  input_values: &[Scalar],
+  matrix: &SparseMatrix,
+  num_columns: usize,
+  product: ResizeProduct,
+) -> Result<(Vec<AllocatedNum<Scalar>>, Vec<Scalar>), SynthesisError>
+where
+  Scalar: PrimeField,
+  CS: ConstraintSystem<Scalar>,
+{
+  assert_eq!(input_vars.len(), input_values.len());
+
+  let output_terms = match product {
+    ResizeProduct::MatrixVector => {
+      assert_eq!(input_vars.len(), num_columns);
+      matrix.clone()
+    }
+    ResizeProduct::VectorMatrix => {
+      assert_eq!(input_vars.len(), matrix.len());
+      let mut transposed = vec![Vec::new(); num_columns];
+      for (input_index, row) in matrix.iter().enumerate() {
+        for &(output_index, coefficient) in row {
+          assert!(output_index < num_columns);
+          transposed[output_index].push((input_index, coefficient));
+        }
+      }
+      transposed
+    }
+  };
+
+  let mut output_vars = Vec::with_capacity(output_terms.len());
+  let mut output_values = Vec::with_capacity(output_terms.len());
+  for (output_index, terms) in output_terms.iter().enumerate() {
+    let mut output_value = Scalar::ZERO;
+    let mut output_lc = LinearCombination::zero();
+    for &(input_index, coefficient_u64) in terms {
+      assert!(input_index < input_vars.len());
+      let coefficient = Scalar::from(coefficient_u64);
+      output_value += coefficient * input_values[input_index];
+      output_lc = output_lc + (coefficient, input_vars[input_index].get_variable());
+    }
+
+    let output_var = AllocatedNum::alloc(cs.namespace(|| format!("entry {output_index}")), || {
+      Ok(output_value)
+    })?;
+    cs.enforce(
+      || format!("computation {output_index}"),
+      |lc| lc + &output_lc,
+      |lc| lc + CS::one(),
+      |lc| lc + output_var.get_variable(),
+    );
+
+    output_vars.push(output_var);
+    output_values.push(output_value);
+  }
+
+  Ok((output_vars, output_values))
+}
+
 #[derive(Clone, Debug)]
 pub struct ResizingCircuit<Scalar: PrimeField> {
   image: Vec<Vec<u8>>,
@@ -45,8 +114,6 @@ pub struct ResizingCircuit<Scalar: PrimeField> {
   output_polynomial_interpolation_challenge: Scalar,
   public_input_poly_eval: Scalar,
   public_output_poly_eval: Scalar,
-  rTA: Vec<Scalar>,
-  As: Vec<Scalar>,
   pub convolution_result: Vec<Vec<u64>>,
 }
 
@@ -144,12 +211,6 @@ impl<Scalar: PrimeField + PrimeFieldBits> ResizingCircuit<Scalar> {
       });
     let target_image = edited_image.clone();
 
-    // Build resizing matrices for downscaling by 2x in both dimensions.
-    let resize_v_f: Vec<Vec<Scalar>> = create_resizing_matrix(height, height / 2, false);
-    let resize_h_f: Vec<Vec<Scalar>> = create_resizing_matrix(width, width / 2, true);
-    let rTA = vector_matrix_product(&r, &resize_v_f);
-    let As = matrix_vector_product(&resize_h_f, &s);
-
     Self {
       image,
       edited_image,
@@ -162,8 +223,6 @@ impl<Scalar: PrimeField + PrimeFieldBits> ResizingCircuit<Scalar> {
       output_polynomial_interpolation_challenge,
       public_input_poly_eval,
       public_output_poly_eval,
-      rTA,
-      As,
       convolution_result,
     }
   }
@@ -180,8 +239,6 @@ impl<E: Engine> SpartanCircuit<E> for ResizingCircuit<E::Scalar> {
 
     public_vals.extend(self.r.clone());
     public_vals.extend(self.s.clone());
-    public_vals.extend(self.rTA.clone());
-    public_vals.extend(self.As.clone());
     public_vals.push(self.logup_challenge_1);
     public_vals.push(self.logup_challenge_2);
     public_vals.push(self.input_polynomial_interpolation_challenge);
@@ -291,17 +348,29 @@ impl<E: Engine> SpartanCircuit<E> for ResizingCircuit<E::Scalar> {
       allocated_s.push(n);
     }
 
-    let mut allocated_rTA = Vec::new();
-    for (i, val) in self.rTA.clone().into_iter().enumerate() {
-      let n = AllocatedNum::alloc_input(cs.namespace(|| format!("rTA entry {i}")), || Ok(val))?;
-      allocated_rTA.push(n);
-    }
-
-    let mut allocated_As = Vec::new();
-    for (i, val) in self.As.clone().into_iter().enumerate() {
-      let n = AllocatedNum::alloc_input(cs.namespace(|| format!("As entry {i}")), || Ok(val))?;
-      allocated_As.push(n);
-    }
+    // A_v is (height / 2) x height and A_h is width x (width / 2).
+    // Materialize r^T A_v and A_h s once, binding every output entry with one
+    // wide linear constraint over only the sparse resize coefficients.
+    let height = image_input_vars.len();
+    let width = image_input_vars[0].len();
+    let resize_v_sparse = create_resizing_sparse(height, height / 2, false);
+    let resize_h_sparse = create_resizing_sparse(width, width / 2, true);
+    let (allocated_rTA, rTA_values) = allocate_resize_product(
+      &mut cs.namespace(|| "compute rTA"),
+      &allocated_r,
+      &self.r,
+      &resize_v_sparse,
+      height,
+      ResizeProduct::VectorMatrix,
+    )?;
+    let (allocated_As, As_values) = allocate_resize_product(
+      &mut cs.namespace(|| "compute As"),
+      &allocated_s,
+      &self.s,
+      &resize_h_sparse,
+      width / 2,
+      ResizeProduct::MatrixVector,
+    )?;
 
     // 3. Compute LHS of Freivalds: (r^T A_v) I (A_h s).
     let mut IAs = Vec::new();
@@ -311,7 +380,7 @@ impl<E: Engine> SpartanCircuit<E> for ResizingCircuit<E::Scalar> {
       let mut running_sum = E::Scalar::ZERO;
 
       for ((j, x), y) in row.iter().enumerate().zip(allocated_As.iter()) {
-        running_sum = running_sum + E::Scalar::from_u128(self.image[i][j] as u128) * self.As[j];
+        running_sum = running_sum + E::Scalar::from_u128(self.image[i][j] as u128) * As_values[j];
 
         let partial_sum_var = AllocatedNum::alloc(
           cs.namespace(|| format!("Row {i} IAs partial sum {j}")),
@@ -344,7 +413,7 @@ impl<E: Engine> SpartanCircuit<E> for ResizingCircuit<E::Scalar> {
     let mut lhs_partial_sums: Vec<AllocatedNum<E::Scalar>> = Vec::new();
     let mut lhs_running_sum = E::Scalar::ZERO;
     for (i, (x, y)) in IAs.iter().zip(allocated_rTA.iter()).enumerate() {
-      lhs_running_sum = lhs_running_sum + self.rTA[i] * IAs_felts[i];
+      lhs_running_sum = lhs_running_sum + rTA_values[i] * IAs_felts[i];
       let partial_sum_var =
         AllocatedNum::alloc(cs.namespace(|| format!("LHS partial sum {i}")), || {
           Ok(lhs_running_sum)
@@ -901,5 +970,281 @@ impl<E: Engine> SpartanCircuit<E> for ResizingCircuit<E::Scalar> {
     );
 
     Ok(())
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use bellpepper_core::test_cs::TestConstraintSystem;
+  use spartan2::{
+    provider::T256HyraxEngine,
+    traits::{Engine, circuit::SpartanCircuit},
+  };
+
+  type E = T256HyraxEngine;
+  type Scalar = <E as Engine>::Scalar;
+
+  fn scalar(value: u64) -> Scalar {
+    Scalar::from_u128(value as u128)
+  }
+
+  fn allocate_public_vector(
+    cs: &mut TestConstraintSystem<Scalar>,
+    label: &str,
+    values: &[Scalar],
+  ) -> Vec<AllocatedNum<Scalar>> {
+    values
+      .iter()
+      .enumerate()
+      .map(|(index, &value)| {
+        AllocatedNum::alloc_input(cs.namespace(|| format!("{label} {index}")), || Ok(value))
+          .unwrap()
+      })
+      .collect()
+  }
+
+  fn polynomial_evaluation(bytes: &[u8], challenge: Scalar) -> Scalar {
+    let packed: Vec<Scalar> = bytes
+      .chunks(BYTES_PER_FIELD_ELEMENT)
+      .map(|chunk| {
+        chunk
+          .iter()
+          .fold((Scalar::ZERO, Scalar::ONE), |(value, coefficient), byte| {
+            (
+              value + coefficient * scalar(*byte as u64),
+              coefficient * scalar(1 << 8),
+            )
+          })
+          .0
+      })
+      .collect();
+    packed.iter().skip(1).fold(packed[0], |evaluation, value| {
+      evaluation * challenge + value
+    })
+  }
+
+  fn small_valid_circuit() -> ResizingCircuit<Scalar> {
+    let image = vec![
+      vec![1, 2, 3, 4, 5, 6],
+      vec![7, 8, 9, 10, 11, 12],
+      vec![13, 14, 15, 16, 17, 18],
+      vec![19, 20, 21, 22, 23, 24],
+    ];
+    let image_u64: Vec<Vec<u64>> = image
+      .iter()
+      .map(|row| row.iter().map(|&pixel| pixel as u64).collect())
+      .collect();
+    let vertical = create_resizing_sparse(image.len(), image.len() / 2, false);
+    let horizontal = create_resizing_sparse(image[0].len(), image[0].len() / 2, true);
+    let row_wise = sparse_dense_matmul_u64(&vertical, &image_u64);
+    let convolution_result = dense_sparse_matmul_u64(&row_wise, &horizontal, image[0].len() / 2);
+    let edited_image: Vec<Vec<u8>> = convolution_result
+      .iter()
+      .map(|row| row.iter().map(|value| (value >> 32) as u8).collect())
+      .collect();
+    let input_challenge = scalar(37);
+    let output_challenge = scalar(41);
+
+    ResizingCircuit {
+      public_input_poly_eval: polynomial_evaluation(
+        &image.iter().flatten().copied().collect::<Vec<_>>(),
+        input_challenge,
+      ),
+      public_output_poly_eval: polynomial_evaluation(
+        &edited_image.iter().flatten().copied().collect::<Vec<_>>(),
+        output_challenge,
+      ),
+      target_image: edited_image.clone(),
+      image,
+      edited_image,
+      r: vec![scalar(11), scalar(13)],
+      s: vec![scalar(17), scalar(19), scalar(23)],
+      logup_challenge_1: scalar(1_000_000),
+      logup_challenge_2: scalar(2_000_000),
+      input_polynomial_interpolation_challenge: input_challenge,
+      output_polynomial_interpolation_challenge: output_challenge,
+      convolution_result,
+    }
+  }
+
+  #[test]
+  fn sparse_products_match_dense_rectangular_references_and_are_constrained() {
+    use super::utils::{create_resizing_matrix, matrix_vector_product, vector_matrix_product};
+
+    // Non-integral ratios exercise overlapping multi-term sparse rows and
+    // make the two rectangular product orientations distinguishable.
+    let vertical_src = 17;
+    let vertical_dst = 7;
+    let horizontal_src = 14;
+    let horizontal_dst = 6;
+    let r: Vec<Scalar> = (0..vertical_dst)
+      .map(|i| scalar(3 * i as u64 + 1))
+      .collect();
+    let s: Vec<Scalar> = (0..horizontal_dst)
+      .map(|i| scalar(5 * i as u64 + 2))
+      .collect();
+
+    let vertical_dense = create_resizing_matrix(vertical_src, vertical_dst, false);
+    let horizontal_dense = create_resizing_matrix(horizontal_src, horizontal_dst, true);
+    let vertical_sparse = create_resizing_sparse(vertical_src, vertical_dst, false);
+    let horizontal_sparse = create_resizing_sparse(horizontal_src, horizontal_dst, true);
+    let expected_rTA = vector_matrix_product(&r, &vertical_dense);
+    let expected_As = matrix_vector_product(&horizontal_dense, &s);
+
+    let mut cs = TestConstraintSystem::new();
+    let allocated_r = allocate_public_vector(&mut cs, "r", &r);
+    let allocated_s = allocate_public_vector(&mut cs, "s", &s);
+    let (allocated_rTA, rTA_values) = allocate_resize_product(
+      &mut cs.namespace(|| "compute rTA"),
+      &allocated_r,
+      &r,
+      &vertical_sparse,
+      vertical_src,
+      ResizeProduct::VectorMatrix,
+    )
+    .unwrap();
+    let (allocated_As, As_values) = allocate_resize_product(
+      &mut cs.namespace(|| "compute As"),
+      &allocated_s,
+      &s,
+      &horizontal_sparse,
+      horizontal_dst,
+      ResizeProduct::MatrixVector,
+    )
+    .unwrap();
+
+    assert_eq!(rTA_values, expected_rTA);
+    assert_eq!(As_values, expected_As);
+    assert_eq!(
+      allocated_rTA
+        .iter()
+        .map(|value| value.get_value().unwrap())
+        .collect::<Vec<_>>(),
+      expected_rTA,
+    );
+    assert_eq!(
+      allocated_As
+        .iter()
+        .map(|value| value.get_value().unwrap())
+        .collect::<Vec<_>>(),
+      expected_As,
+    );
+    assert_eq!(cs.num_constraints(), vertical_src + horizontal_src);
+    assert!(cs.is_satisfied());
+
+    let rTA_path = "compute rTA/entry 0/num";
+    let correct_rTA = cs.get(rTA_path);
+    cs.set(rTA_path, correct_rTA + Scalar::ONE);
+    assert_eq!(cs.which_is_unsatisfied(), Some("compute rTA/computation 0"));
+    cs.set(rTA_path, correct_rTA);
+    assert!(cs.is_satisfied());
+
+    let As_path = "compute As/entry 0/num";
+    let correct_As = cs.get(As_path);
+    cs.set(As_path, correct_As + Scalar::ONE);
+    assert_eq!(cs.which_is_unsatisfied(), Some("compute As/computation 0"));
+  }
+
+  #[test]
+  fn exact_two_x_products_include_structural_zero_entries() {
+    let source_size = 8;
+    let destination_size = source_size / 2;
+    let input_values = vec![scalar(2), scalar(3), scalar(5), scalar(7)];
+    let sparse = create_resizing_sparse(source_size, destination_size, false);
+    let mut cs = TestConstraintSystem::new();
+    let allocated_input = allocate_public_vector(&mut cs, "input", &input_values);
+    let (outputs, output_values) = allocate_resize_product(
+      &mut cs,
+      &allocated_input,
+      &input_values,
+      &sparse,
+      source_size,
+      ResizeProduct::VectorMatrix,
+    )
+    .unwrap();
+
+    let scale = scalar(1 << 16);
+    assert_eq!(outputs.len(), source_size);
+    assert_eq!(
+      output_values,
+      vec![
+        scale * scalar(2),
+        Scalar::ZERO,
+        scale * scalar(3),
+        Scalar::ZERO,
+        scale * scalar(5),
+        Scalar::ZERO,
+        scale * scalar(7),
+        Scalar::ZERO,
+      ],
+    );
+    assert_eq!(cs.num_constraints(), source_size);
+    assert!(cs.is_satisfied());
+
+    // Empty sparse rows are still explicitly bound to zero.
+    cs.set("entry 1/num", Scalar::ONE);
+    assert_eq!(cs.which_is_unsatisfied(), Some("computation 1"));
+  }
+
+  #[test]
+  fn public_values_omit_derived_products() {
+    let circuit = small_valid_circuit();
+    let public_values =
+      <ResizingCircuit<Scalar> as SpartanCircuit<E>>::public_values(&circuit).unwrap();
+
+    assert_eq!(
+      public_values,
+      vec![
+        scalar(11),
+        scalar(13),
+        scalar(17),
+        scalar(19),
+        scalar(23),
+        scalar(1_000_000),
+        scalar(2_000_000),
+        scalar(37),
+        circuit.public_input_poly_eval,
+        scalar(41),
+        circuit.public_output_poly_eval,
+      ],
+    );
+    assert_eq!(public_values.len(), circuit.r.len() + circuit.s.len() + 6);
+  }
+
+  #[test]
+  fn complete_circuit_is_satisfied_with_derived_products() {
+    let circuit = small_valid_circuit();
+    let expected_public_values =
+      <ResizingCircuit<Scalar> as SpartanCircuit<E>>::public_values(&circuit).unwrap();
+    let mut cs = TestConstraintSystem::new();
+    <ResizingCircuit<Scalar> as SpartanCircuit<E>>::synthesize(
+      &circuit,
+      &mut cs,
+      &[],
+      &[],
+      Some(&[]),
+    )
+    .unwrap();
+
+    assert!(cs.is_satisfied());
+    assert!(cs.verify(&expected_public_values));
+    let height = circuit.image.len();
+    let width = circuit.image[0].len();
+    let pixels = height * width;
+    let output_height = height / 2;
+    let output_width = width / 2;
+    let output_pixels = output_height * output_width;
+    let constraints_before_derived_products = 2 * pixels
+      + 5 * output_pixels
+      + height
+      + output_height
+      + pixels.div_ceil(BYTES_PER_FIELD_ELEMENT)
+      + output_pixels.div_ceil(BYTES_PER_FIELD_ELEMENT)
+      + 65_797;
+    assert_eq!(
+      cs.num_constraints(),
+      constraints_before_derived_products + height + width,
+    );
   }
 }
