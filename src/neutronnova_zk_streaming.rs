@@ -1190,7 +1190,7 @@ where
     info!(elapsed_ms = %gen_t.elapsed().as_millis(), step_circuits = step_circuits.len(), "generate_instances_witnesses");
 
     let du_out = std::process::Command::new("du")
-      .args(["-sk", "/home/sfrolov/scratch/temp_neutronnova_files"])
+      .args(["-sk", "/home/sashafrolov/scratch/temp_neutronnova_files"])
       .output();
     if let Ok(out) = du_out {
       info!(output = %String::from_utf8_lossy(&out.stdout), "du_tmp");

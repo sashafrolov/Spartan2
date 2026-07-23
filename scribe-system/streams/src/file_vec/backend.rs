@@ -154,7 +154,7 @@ impl InnerFile {
         #[cfg(target_os = "linux")]
         options.custom_flags(libc::O_DIRECT);
         let temp_dir = std::env::var_os("SCRIBE_TEMP_DIR")
-            .unwrap_or_else(|| "/home/sfrolov/scratch/temp_neutronnova_files".into());
+            .unwrap_or_else(|| "/home/sashafrolov/scratch/temp_neutronnova_files".into());
         let (file, path) = Builder::new()
             .prefix(&prefix)
             .suffix(".scribe")
