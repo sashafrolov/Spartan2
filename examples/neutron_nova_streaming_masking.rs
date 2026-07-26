@@ -110,11 +110,16 @@ fn main() {
   let t0 = Instant::now();
   let result = snark.verify(&vk, NUM_CIRCUITS).unwrap();
   let verify_ms = t0.elapsed().as_millis();
-  let (public_values_step, _public_values_core): (Vec<_>, Vec<_>) = result;
+  let (public_values_step, public_values_core): (Vec<_>, Vec<_>) = result;
   info!(elapsed_ms = verify_ms, "verify");
 
   let snark_bytes = bincode::serialize(&snark).unwrap().len();
   info!(bytes = snark_bytes, "snark_size");
+  let public_values_bytes =
+    bincode::serialize(&(public_values_step.as_slice(), public_values_core.as_slice()))
+      .unwrap()
+      .len();
+  info!(bytes = public_values_bytes, "public_values_size");
 
   info!(
     num_step_circuits = public_values_step.len(),
