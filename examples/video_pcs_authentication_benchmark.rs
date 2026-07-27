@@ -1,11 +1,21 @@
-//! Benchmark KZG10 authentication for decomposed video frame channels.
+//! Benchmark KZG10 authentication for video data packed into polynomials.
+//!
+//! The repository authenticates video with two different packing approaches, and this
+//! benchmark measures both as separate phases:
+//!   per_channel — each R/G/B channel PNG is packed into its own polynomial, mirroring
+//!                 circuits/resizing_circuit.rs and circuits/gaussian_blur_circuit.rs
+//!   per_frame   — the interleaved RGB pixel bytes of each full frame PNG are packed into
+//!                 one polynomial, mirroring circuits/grayscale_circuit.rs and
+//!                 circuits/mask_circuit.rs
 //!
 //! Run with:
 //!   RUSTFLAGS="-C target-cpu=native" cargo run --release --example video_pcs_authentication_benchmark
 //!
 //! Useful environment variables:
 //!   VIDEO_CHANNEL_DIR=video_data/decomposed_frame_channels
-//!   VIDEO_PCS_MAX_FILES=30
+//!   VIDEO_FRAME_DIR=video_data/decomposed_frames
+//!   VIDEO_PCS_MODE=both            # both | channel | frame
+//!   VIDEO_PCS_MAX_FILES=30         # per phase: channel files (3 per frame) or frame files (1 per frame)
 //!   VIDEO_PCS_PRINT_PER_CHANNEL=1
 //!   PARALLEL_VERIFICATION=true
 //!   RAYON_NUM_THREADS=8
@@ -32,8 +42,14 @@ use std::{
 };
 
 const DEFAULT_CHANNEL_DIR: &str = "video_data/decomposed_frame_channels";
+const DEFAULT_FRAME_DIR: &str = "video_data/decomposed_frames";
 const BYTES_PER_FIELD_ELEMENT: usize = 30;
-const CIRCUIT_INPUT_CHALLENGE_OFFSET: u64 = 3;
+// Seed offset of `input_polynomial_interpolation_challenge` in the per-channel circuits
+// (resizing_circuit.rs, gaussian_blur_circuit.rs).
+const CHANNEL_INPUT_CHALLENGE_OFFSET: u64 = 3;
+// Seed offset of `input_polynomial_interpolation_challenge` in the per-frame circuits
+// (grayscale_circuit.rs, mask_circuit.rs).
+const FRAME_INPUT_CHALLENGE_OFFSET: u64 = 1;
 const KZG_SETUP_SEED: u64 = 0x5eed_c0de;
 
 type UniPoly = DensePolynomial<Fr>;
@@ -77,24 +93,72 @@ impl Channel {
   }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BenchmarkMode {
+  Both,
+  ChannelOnly,
+  FrameOnly,
+}
+
+impl BenchmarkMode {
+  fn from_env() -> Result<Self, Box<dyn Error>> {
+    match env::var("VIDEO_PCS_MODE") {
+      Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+        "" | "both" => Ok(Self::Both),
+        "channel" | "per_channel" => Ok(Self::ChannelOnly),
+        "frame" | "per_frame" => Ok(Self::FrameOnly),
+        other => Err(
+          invalid_input(format!(
+            "VIDEO_PCS_MODE must be both|channel|frame, got {other:?}"
+          ))
+          .into(),
+        ),
+      },
+      Err(env::VarError::NotPresent) => Ok(Self::Both),
+      Err(err) => Err(err.into()),
+    }
+  }
+
+  fn includes_channel_phase(self) -> bool {
+    matches!(self, Self::Both | Self::ChannelOnly)
+  }
+
+  fn includes_frame_phase(self) -> bool {
+    matches!(self, Self::Both | Self::FrameOnly)
+  }
+}
+
 #[derive(Clone, Debug)]
 struct BenchmarkConfig {
   channel_dir: PathBuf,
+  frame_dir: PathBuf,
+  mode: BenchmarkMode,
   max_files: Option<usize>,
   print_per_channel: bool,
   parallel_verification: bool,
 }
 
 #[derive(Clone, Debug)]
-struct ChannelFile {
+struct SourceFile {
   path: PathBuf,
   frame_index: u64,
-  channel: Channel,
+  // Some(_) for per-channel packing, None for whole-frame RGB packing.
+  channel: Option<Channel>,
+}
+
+impl SourceFile {
+  fn channel_label(&self) -> &'static str {
+    self.channel.map_or("RGB", Channel::as_str)
+  }
+
+  fn artifact_group_index(&self) -> usize {
+    self.channel.map_or(3, |c| c.sort_index() as usize)
+  }
 }
 
 #[derive(Debug)]
-struct ChannelPolynomial {
-  file: ChannelFile,
+struct PackedPolynomial {
+  file: SourceFile,
   width: u32,
   height: u32,
   coeffs: Vec<Fr>,
@@ -137,6 +201,10 @@ impl BenchmarkConfig {
       channel_dir: PathBuf::from(
         env::var("VIDEO_CHANNEL_DIR").unwrap_or_else(|_| DEFAULT_CHANNEL_DIR.to_string()),
       ),
+      frame_dir: PathBuf::from(
+        env::var("VIDEO_FRAME_DIR").unwrap_or_else(|_| DEFAULT_FRAME_DIR.to_string()),
+      ),
+      mode: BenchmarkMode::from_env()?,
       max_files: optional_env_usize("VIDEO_PCS_MAX_FILES")?,
       print_per_channel: env_flag("VIDEO_PCS_PRINT_PER_CHANNEL"),
       parallel_verification: env_flag("PARALLEL_VERIFICATION"),
@@ -145,30 +213,64 @@ impl BenchmarkConfig {
 }
 
 fn run_benchmark(config: BenchmarkConfig) -> Result<(), Box<dyn Error>> {
+  if config.mode.includes_channel_phase() {
+    let files = discover_channel_files(&config.channel_dir)?;
+    run_authentication_phase(
+      "per_channel",
+      &config.channel_dir,
+      &config,
+      files,
+      read_channel_polynomial,
+    )?;
+  }
+
+  if config.mode.includes_frame_phase() {
+    if config.mode == BenchmarkMode::Both {
+      println!();
+    }
+    let files = discover_frame_files(&config.frame_dir)?;
+    run_authentication_phase(
+      "per_frame",
+      &config.frame_dir,
+      &config,
+      files,
+      read_frame_polynomial,
+    )?;
+  }
+
+  Ok(())
+}
+
+fn run_authentication_phase(
+  phase: &str,
+  source_dir: &Path,
+  config: &BenchmarkConfig,
+  mut files: Vec<SourceFile>,
+  loader: fn(SourceFile) -> Result<PackedPolynomial, Box<dyn Error + Send + Sync>>,
+) -> Result<(), Box<dyn Error>> {
   let wall_start = Instant::now();
   let mut totals = PhaseTotals::default();
 
-  let mut files = discover_channel_files(&config.channel_dir)?;
   if let Some(max_files) = config.max_files {
     files.truncate(max_files);
   }
   if files.is_empty() {
     return Err(
       invalid_input(format!(
-        "no R/G/B PNG channel files found in {}",
-        config.channel_dir.display()
+        "no input PNG files for {phase} authentication found in {}",
+        source_dir.display()
       ))
       .into(),
     );
   }
 
-  let mut polynomials = Vec::with_capacity(files.len());
-  for file in files {
-    let t0 = Instant::now();
-    let poly = read_channel_polynomial(file)?;
-    totals.load_and_pack += t0.elapsed();
-    polynomials.push(poly);
-  }
+  let t0 = Instant::now();
+  let polynomials = files
+    .into_par_iter()
+    .map(loader)
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(|err| -> Box<dyn Error> { err })?;
+  totals.load_and_pack = t0.elapsed();
 
   let min_coeffs = polynomials.iter().map(|p| p.coeffs.len()).min().unwrap();
   let max_coeffs = polynomials.iter().map(|p| p.coeffs.len()).max().unwrap();
@@ -350,7 +452,7 @@ fn run_benchmark(config: BenchmarkConfig) -> Result<(), Box<dyn Error>> {
   }
 
   if config.print_per_channel {
-    print_per_channel(
+    print_per_polynomial(
       &polynomials,
       &commitment_bytes_by_poly,
       &opening_proof_bytes_by_poly,
@@ -358,7 +460,9 @@ fn run_benchmark(config: BenchmarkConfig) -> Result<(), Box<dyn Error>> {
   }
 
   print_summary(
-    &config,
+    phase,
+    source_dir,
+    config,
     &polynomials,
     &totals,
     wall_start.elapsed(),
@@ -416,7 +520,7 @@ fn trim_kzg_params(
   Ok((powers, vk))
 }
 
-fn discover_channel_files(dir: &Path) -> Result<Vec<ChannelFile>, Box<dyn Error>> {
+fn discover_channel_files(dir: &Path) -> Result<Vec<SourceFile>, Box<dyn Error>> {
   let mut files = Vec::new();
   for entry in fs::read_dir(dir)? {
     let path = entry?.path();
@@ -429,11 +533,28 @@ fn discover_channel_files(dir: &Path) -> Result<Vec<ChannelFile>, Box<dyn Error>
     }
   }
 
-  files.sort_by_key(|f| (f.frame_index, f.channel.sort_index()));
+  files.sort_by_key(|f| (f.frame_index, f.artifact_group_index()));
   Ok(files)
 }
 
-fn parse_channel_file(path: PathBuf) -> Result<Option<ChannelFile>, Box<dyn Error>> {
+fn discover_frame_files(dir: &Path) -> Result<Vec<SourceFile>, Box<dyn Error>> {
+  let mut files = Vec::new();
+  for entry in fs::read_dir(dir)? {
+    let path = entry?.path();
+    if !path.is_file() || !has_png_extension(&path) {
+      continue;
+    }
+
+    if let Some(file) = parse_frame_file(path)? {
+      files.push(file);
+    }
+  }
+
+  files.sort_by_key(|f| f.frame_index);
+  Ok(files)
+}
+
+fn parse_channel_file(path: PathBuf) -> Result<Option<SourceFile>, Box<dyn Error>> {
   let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
     return Ok(None);
   };
@@ -450,14 +571,47 @@ fn parse_channel_file(path: PathBuf) -> Result<Option<ChannelFile>, Box<dyn Erro
     ))
   })?;
 
-  Ok(Some(ChannelFile {
+  Ok(Some(SourceFile {
     path,
     frame_index,
-    channel,
+    channel: Some(channel),
   }))
 }
 
-fn read_channel_polynomial(file: ChannelFile) -> Result<ChannelPolynomial, Box<dyn Error>> {
+fn parse_frame_file(path: PathBuf) -> Result<Option<SourceFile>, Box<dyn Error>> {
+  let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+    return Ok(None);
+  };
+  let Some(frame_name) = stem.strip_prefix("frame_") else {
+    return Ok(None);
+  };
+  let frame_index = frame_name.parse::<u64>().map_err(|err| {
+    invalid_input(format!(
+      "failed to parse frame index from {}: {err}",
+      path.display()
+    ))
+  })?;
+
+  Ok(Some(SourceFile {
+    path,
+    frame_index,
+    channel: None,
+  }))
+}
+
+fn read_channel_polynomial(
+  file: SourceFile,
+) -> Result<PackedPolynomial, Box<dyn Error + Send + Sync>> {
+  let Some(channel) = file.channel else {
+    return Err(
+      invalid_input(format!(
+        "channel loader called on frame file {}",
+        file.path.display()
+      ))
+      .into(),
+    );
+  };
+
   let image = ImageReader::open(&file.path)?.decode()?.into_luma8();
   let (width, height) = image.dimensions();
   if width == 0 || height == 0 {
@@ -465,6 +619,39 @@ fn read_channel_polynomial(file: ChannelFile) -> Result<ChannelPolynomial, Box<d
   }
 
   let coeffs = pack_bytes_as_field_elements(image.as_raw());
+  let challenge = deterministic_challenge(
+    channel_seed_base(file.frame_index, channel) + CHANNEL_INPUT_CHALLENGE_OFFSET,
+  );
+
+  build_packed_polynomial(file, width, height, coeffs, challenge)
+}
+
+fn read_frame_polynomial(
+  file: SourceFile,
+) -> Result<PackedPolynomial, Box<dyn Error + Send + Sync>> {
+  let image = ImageReader::open(&file.path)?.decode()?.into_rgb8();
+  let (width, height) = image.dimensions();
+  if width == 0 || height == 0 {
+    return Err(invalid_input(format!("empty image {}", file.path.display())).into());
+  }
+
+  // The raw buffer is the row-major interleaved R,G,B byte stream. Packing it 30 bytes
+  // per field element is identical to the 10-pixels-per-scalar packing in
+  // grayscale_circuit.rs / mask_circuit.rs.
+  let coeffs = pack_bytes_as_field_elements(image.as_raw());
+  let challenge =
+    deterministic_challenge(frame_seed_base(file.frame_index) + FRAME_INPUT_CHALLENGE_OFFSET);
+
+  build_packed_polynomial(file, width, height, coeffs, challenge)
+}
+
+fn build_packed_polynomial(
+  file: SourceFile,
+  width: u32,
+  height: u32,
+  coeffs: Vec<Fr>,
+  challenge: Fr,
+) -> Result<PackedPolynomial, Box<dyn Error + Send + Sync>> {
   if coeffs.is_empty() {
     return Err(
       invalid_input(format!(
@@ -477,9 +664,8 @@ fn read_channel_polynomial(file: ChannelFile) -> Result<ChannelPolynomial, Box<d
 
   let ark_coeffs_little_endian = coeffs.iter().rev().copied().collect();
   let polynomial = UniPoly::from_coefficients_vec(ark_coeffs_little_endian);
-  let challenge = deterministic_challenge(circuit_seed_base(file.frame_index, file.channel));
 
-  Ok(ChannelPolynomial {
+  Ok(PackedPolynomial {
     file,
     width,
     height,
@@ -512,13 +698,17 @@ fn evaluate_circuit_horner(coeffs: &[Fr], point: &Fr) -> Fr {
   rest.iter().fold(first, |acc, coeff| acc * point + coeff)
 }
 
-fn deterministic_challenge(seed_base: u64) -> Fr {
-  let mut rng = StdRng::seed_from_u64(seed_base + CIRCUIT_INPUT_CHALLENGE_OFFSET);
+fn deterministic_challenge(seed: u64) -> Fr {
+  let mut rng = StdRng::seed_from_u64(seed);
   Fr::from(rng.gen_range(0..(1u128 << 127)))
 }
 
-fn circuit_seed_base(frame_index: u64, channel: Channel) -> u64 {
+fn channel_seed_base(frame_index: u64, channel: Channel) -> u64 {
   (1u64 << 32) + 18 * frame_index + 6 * channel.seed_offset()
+}
+
+fn frame_seed_base(frame_index: u64) -> u64 {
+  (1u64 << 32) + 5 * frame_index
 }
 
 fn has_png_extension(path: &Path) -> bool {
@@ -551,12 +741,12 @@ fn env_flag(name: &str) -> bool {
     .unwrap_or(false)
 }
 
-fn print_per_channel(
-  polynomials: &[ChannelPolynomial],
+fn print_per_polynomial(
+  polynomials: &[PackedPolynomial],
   commitment_bytes_by_poly: &[usize],
   opening_proof_bytes_by_poly: &[usize],
 ) {
-  println!("per_channel");
+  println!("per_polynomial");
   println!("frame,channel,width,height,coeffs,degree,commitment_bytes,opening_proof_bytes,path");
   for ((poly, commitment_bytes), opening_proof_bytes) in polynomials
     .iter()
@@ -566,7 +756,7 @@ fn print_per_channel(
     println!(
       "{},{},{},{},{},{},{},{},{}",
       poly.file.frame_index,
-      poly.file.channel.as_str(),
+      poly.file.channel_label(),
       poly.width,
       poly.height,
       poly.coeffs.len(),
@@ -580,8 +770,10 @@ fn print_per_channel(
 
 #[allow(clippy::too_many_arguments)]
 fn print_summary(
+  phase: &str,
+  source_dir: &Path,
   config: &BenchmarkConfig,
-  polynomials: &[ChannelPolynomial],
+  polynomials: &[PackedPolynomial],
   totals: &PhaseTotals,
   wall_time: Duration,
   setup_degree: usize,
@@ -596,10 +788,11 @@ fn print_summary(
 ) {
   let n = polynomials.len();
   println!("video_pcs_authentication_benchmark");
+  println!("phase={phase}");
   println!("curve={}", std::any::type_name::<Bls12_381>());
   println!("pcs={}", std::any::type_name::<Kzg>());
-  println!("channel_dir={}", config.channel_dir.display());
-  println!("channels={n}");
+  println!("source_dir={}", source_dir.display());
+  println!("polynomials={n}");
   println!("rayon_threads={}", rayon::current_num_threads());
   println!("parallel_verification={}", config.parallel_verification);
   println!("setup_degree={setup_degree}");
@@ -617,7 +810,7 @@ fn print_summary(
     scalar_checksum_prefix(horner_evals)
   );
   println!("pcs_eval_checksum={}", scalar_checksum_prefix(pcs_evals));
-  println!("phase,total,per_channel");
+  println!("phase,total,per_polynomial");
   print_phase("load_and_pack", totals.load_and_pack, n);
   print_phase("setup", totals.setup, n);
   print_phase("commit", totals.commit, n);
@@ -630,41 +823,44 @@ fn print_summary(
 }
 
 fn print_artifact_bytes_by_channel(
-  polynomials: &[ChannelPolynomial],
+  polynomials: &[PackedPolynomial],
   commitment_bytes_by_poly: &[usize],
   opening_proof_bytes_by_poly: &[usize],
 ) {
-  let mut commitment_totals = [0usize; 3];
-  let mut opening_proof_totals = [0usize; 3];
+  const GROUP_LABELS: [&str; 4] = ["R", "G", "B", "RGB"];
+  let mut group_counts = [0usize; 4];
+  let mut commitment_totals = [0usize; 4];
+  let mut opening_proof_totals = [0usize; 4];
 
   for ((poly, commitment_bytes), opening_proof_bytes) in polynomials
     .iter()
     .zip(commitment_bytes_by_poly.iter())
     .zip(opening_proof_bytes_by_poly.iter())
   {
-    let channel_idx = poly.file.channel.sort_index() as usize;
-    commitment_totals[channel_idx] += commitment_bytes;
-    opening_proof_totals[channel_idx] += opening_proof_bytes;
+    let group_idx = poly.file.artifact_group_index();
+    group_counts[group_idx] += 1;
+    commitment_totals[group_idx] += commitment_bytes;
+    opening_proof_totals[group_idx] += opening_proof_bytes;
   }
 
   println!("artifact_bytes_by_channel");
   println!("channel,commitment_bytes_total,opening_proof_bytes_total");
-  for channel in [Channel::R, Channel::G, Channel::B] {
-    let channel_idx = channel.sort_index() as usize;
+  for group_idx in 0..GROUP_LABELS.len() {
+    if group_counts[group_idx] == 0 {
+      continue;
+    }
     println!(
       "{},{},{}",
-      channel.as_str(),
-      commitment_totals[channel_idx],
-      opening_proof_totals[channel_idx]
+      GROUP_LABELS[group_idx], commitment_totals[group_idx], opening_proof_totals[group_idx]
     );
   }
 }
 
-fn print_phase(name: &str, duration: Duration, channels: usize) {
+fn print_phase(name: &str, duration: Duration, polynomials: usize) {
   println!(
     "{name},{:.3} ms,{:.3} ms",
     millis(duration),
-    millis(duration) / channels as f64
+    millis(duration) / polynomials as f64
   );
 }
 
