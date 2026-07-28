@@ -2,6 +2,10 @@
 //
 // Run with:
 //   RUST_LOG=neutron_nova_streaming_blurring=info,spartan2::neutronnova_zk_streaming=info RUSTFLAGS="-C target-cpu=native" cargo run --example neutron_nova_streaming_blurring --release
+//
+// Verification is measured repeatedly across a fixed ladder of rayon thread counts (the default
+// pool, then 8, 4, and 1) to show how the verifier scales. Setup, witness generation, and prove
+// always use the global pool, so only the verifier's scaling is isolated.
 
 #![allow(non_snake_case)]
 #[path = "circuits/dummy_circuit.rs"]
@@ -25,6 +29,8 @@ const CHANNELS: [&str; 3] = ["R", "G", "B"];
 const NUM_FRAMES: usize = 4;
 const NUM_CIRCUITS: usize = NUM_FRAMES * 3;
 const IMAGE_DIMS: (usize, usize) = (1280, 720);
+/// Thread counts verification is benchmarked at. `None` is rayon's default global pool.
+const VERIFY_THREAD_LADDER: [Option<usize>; 4] = [None, Some(8), Some(4), Some(1)];
 
 fn main() {
   let _ = tracing_subscriber::fmt()
@@ -115,11 +121,44 @@ fn main() {
   let snark = NeutronNovaZkSNARK::prove(&pk, &step_circuits, &core_circuit, false).unwrap();
   info!(elapsed_ms = t0.elapsed().as_millis(), "prove");
 
-  let t0 = Instant::now();
-  let result = snark.verify(&vk, NUM_CIRCUITS).unwrap();
-  let verify_ms = t0.elapsed().as_millis();
-  let (public_values_step, public_values_core): (Vec<_>, Vec<_>) = result;
-  info!(elapsed_ms = verify_ms, "verify");
+  // Untimed warm-up so the first measured entry in the ladder below is not charged for one-time
+  // costs (page faults, lazy initialization) that later entries avoid. It runs on the default
+  // global pool, matching the ladder's `None` entry.
+  let (public_values_step, public_values_core): (Vec<_>, Vec<_>) =
+    snark.verify(&vk, NUM_CIRCUITS).unwrap();
+
+  for threads in VERIFY_THREAD_LADDER {
+    // The pool is built outside the timed region so spawning its workers is not charged to
+    // verification. `install` makes it the current pool for the closure, so the verifier's
+    // nested rayon work (and arkworks', which is compiled with its `parallel` feature) runs on
+    // these threads rather than the global pool.
+    let pool = threads.map(|thread_count| {
+      rayon::ThreadPoolBuilder::new()
+        .num_threads(thread_count)
+        .build()
+        .expect("failed to build verification thread pool")
+    });
+    let thread_count = pool
+      .as_ref()
+      .map_or_else(rayon::current_num_threads, |pool| {
+        pool.current_num_threads()
+      });
+
+    let t0 = Instant::now();
+    match &pool {
+      Some(pool) => pool.install(|| snark.verify(&vk, NUM_CIRCUITS)),
+      None => snark.verify(&vk, NUM_CIRCUITS),
+    }
+    .unwrap();
+    let verify_ms = t0.elapsed().as_millis();
+
+    info!(
+      elapsed_ms = verify_ms,
+      threads = thread_count,
+      default_pool = threads.is_none(),
+      "verify"
+    );
+  }
 
   let snark_bytes = bincode::serialize(&snark).unwrap().len();
   info!(bytes = snark_bytes, "snark_size");

@@ -107,9 +107,8 @@ pub struct GaussianBlurCircuit<Scalar: PrimeField> {
   logup_challenge_1: Scalar,
   logup_challenge_2: Scalar,
   input_polynomial_interpolation_challenge: Scalar,
-  output_polynomial_interpolation_challenge: Scalar,
   public_input_poly_eval: Scalar,
-  public_output_poly_eval: Scalar,
+  public_output_packed: Vec<Scalar>,
   pub convolution_result: Vec<Vec<u64>>,
 }
 
@@ -143,7 +142,6 @@ impl<Scalar: PrimeField + PrimeFieldBits> GaussianBlurCircuit<Scalar> {
     let logup_challenge_1 = generate_random_vector(1, base + 2).remove(0);
     let logup_challenge_2 = generate_random_vector(1, base + 5).remove(0);
     let input_polynomial_interpolation_challenge = generate_random_vector(1, base + 3).remove(0);
-    let output_polynomial_interpolation_challenge = generate_random_vector(1, base + 4).remove(0);
 
     // Evaluate the input image polynomial interpolation.
     let flat_image_vals: Vec<u8> = image.iter().flatten().copied().collect();
@@ -181,9 +179,12 @@ impl<Scalar: PrimeField + PrimeFieldBits> GaussianBlurCircuit<Scalar> {
       .map(|row| row.iter().map(|&v| (v >> 32) as u8).collect())
       .collect();
 
-    // Evaluate the output image polynomial interpolation.
+    // Pack the edited image into field elements. These packed values are themselves the
+    // public output rather than a Horner evaluation of them: an evaluation at a challenge
+    // the prover picks binds nothing, so the verifier has to receive the packed values
+    // directly. Packing keeps that ~30x smaller than raw pixel values.
     let flat_edited_vals: Vec<u8> = edited_image.iter().flatten().copied().collect();
-    let mut packed_output_scalars: Vec<Scalar> = Vec::new();
+    let mut public_output_packed: Vec<Scalar> = Vec::new();
     for chunk_vals in flat_edited_vals.chunks(BYTES_PER_FIELD_ELEMENT) {
       let mut scalar = Scalar::ZERO;
       let mut coeff = Scalar::ONE;
@@ -191,14 +192,8 @@ impl<Scalar: PrimeField + PrimeFieldBits> GaussianBlurCircuit<Scalar> {
         scalar = scalar + coeff * Scalar::from_u128(val as u128);
         coeff = coeff * Scalar::from_u128(1u128 << 8);
       }
-      packed_output_scalars.push(scalar);
+      public_output_packed.push(scalar);
     }
-    let public_output_poly_eval = packed_output_scalars
-      .iter()
-      .skip(1)
-      .fold(packed_output_scalars[0], |acc, s| {
-        acc * output_polynomial_interpolation_challenge + s
-      });
     let target_image = edited_image.clone();
 
     Self {
@@ -210,9 +205,8 @@ impl<Scalar: PrimeField + PrimeFieldBits> GaussianBlurCircuit<Scalar> {
       logup_challenge_1,
       logup_challenge_2,
       input_polynomial_interpolation_challenge,
-      output_polynomial_interpolation_challenge,
       public_input_poly_eval,
-      public_output_poly_eval,
+      public_output_packed,
       convolution_result,
     }
   }
@@ -233,8 +227,7 @@ impl<E: Engine> SpartanCircuit<E> for GaussianBlurCircuit<E::Scalar> {
     public_vals.push(self.logup_challenge_2);
     public_vals.push(self.input_polynomial_interpolation_challenge);
     public_vals.push(self.public_input_poly_eval);
-    public_vals.push(self.output_polynomial_interpolation_challenge);
-    public_vals.push(self.public_output_poly_eval);
+    public_vals.extend(self.public_output_packed.clone());
 
     Ok(public_vals)
   }
@@ -871,25 +864,19 @@ impl<E: Engine> SpartanCircuit<E> for GaussianBlurCircuit<E::Scalar> {
       |lc| lc + public_input_poly_eval.get_variable(),
     );
 
-    // 9. Do polynomial interpolation verification on the output.
-    // This is a bit of a hack. This NeutronNova implementation has some costs which scale kind of poorly
-    // in the size of the public inputs (the public transcript hashing is almost entirely serial), so this decreases those costs.
-    // Alternative solution could be to make a parallel `Transcript` implementation.
-    let allocated_output_polynomial_interpolation_challenge = AllocatedNum::alloc_input(
-      cs.namespace(|| "output_polynomial_interpolation_challenge"),
-      || Ok(self.output_polynomial_interpolation_challenge),
-    )?;
-
+    // 9. Expose the packed edited image as the circuit's public output.
+    // Each public value is constrained to equal a linear combination over BYTES_PER_FIELD_ELEMENT
+    // of the private edited-image variables, so every output byte is bound by the proof. This
+    // costs one public input per 30 pixels, which NeutronNova's largely serial transcript
+    // hashing is sensitive to, but it is the price of the output actually being committed.
     let flat_edited_vars: Vec<&AllocatedNum<E::Scalar>> =
       allocated_edited_image.iter().flatten().collect();
     let flat_edited_vals: Vec<u8> = self.edited_image.iter().flatten().copied().collect();
 
-    let mut output_packed_lcs: Vec<LinearCombination<E::Scalar>> = Vec::new();
-    let mut output_packed_scalars: Vec<E::Scalar> = Vec::new();
-
-    for (chunk_vars, chunk_vals) in flat_edited_vars
+    for (k, (chunk_vars, chunk_vals)) in flat_edited_vars
       .chunks(BYTES_PER_FIELD_ELEMENT)
       .zip(flat_edited_vals.chunks(BYTES_PER_FIELD_ELEMENT))
+      .enumerate()
     {
       let mut lc = LinearCombination::zero();
       let mut scalar = E::Scalar::ZERO;
@@ -899,64 +886,19 @@ impl<E: Engine> SpartanCircuit<E> for GaussianBlurCircuit<E::Scalar> {
         scalar = scalar + coeff * E::Scalar::from_u128(val as u128);
         coeff = coeff * E::Scalar::from_u128(1u128 << 8);
       }
-      output_packed_lcs.push(lc);
-      output_packed_scalars.push(scalar);
+
+      let public_output_packed_var = AllocatedNum::alloc_input(
+        cs.namespace(|| format!("public_output_packed {k}")),
+        || Ok(scalar),
+      )?;
+
+      cs.enforce(
+        || format!("public_output_packed constraint {k}"),
+        |lc_a| lc_a + public_output_packed_var.get_variable(),
+        |lc_b| lc_b + CS::one(),
+        |lc_c| lc_c + &lc,
+      );
     }
-
-    let mut output_poly_eval_prev: Option<AllocatedNum<E::Scalar>> = None;
-    let mut output_poly_eval_scalar = E::Scalar::ZERO;
-
-    for (k, (lc, scalar)) in output_packed_lcs
-      .iter()
-      .zip(output_packed_scalars.iter())
-      .enumerate()
-    {
-      if let Some(prev) = &output_poly_eval_prev {
-        output_poly_eval_scalar =
-          output_poly_eval_scalar * self.output_polynomial_interpolation_challenge + scalar;
-
-        let output_eval_var =
-          AllocatedNum::alloc(cs.namespace(|| format!("output poly eval {k}")), || {
-            Ok(output_poly_eval_scalar)
-          })?;
-
-        cs.enforce(
-          || format!("output poly eval constraint {k}"),
-          |lc_a| lc_a + prev.get_variable(),
-          |lc_b| lc_b + allocated_output_polynomial_interpolation_challenge.get_variable(),
-          |lc_c| lc_c + output_eval_var.get_variable() - lc,
-        );
-
-        output_poly_eval_prev = Some(output_eval_var);
-      } else {
-        output_poly_eval_scalar = *scalar;
-
-        let output_eval_var =
-          AllocatedNum::alloc(cs.namespace(|| format!("output poly eval {k}")), || {
-            Ok(output_poly_eval_scalar)
-          })?;
-
-        cs.enforce(
-          || format!("output poly eval constraint {k}"),
-          |lc_a| lc_a + output_eval_var.get_variable(),
-          |lc_b| lc_b + CS::one(),
-          |lc_c| lc_c + lc,
-        );
-
-        output_poly_eval_prev = Some(output_eval_var);
-      }
-    }
-    let output_poly_eval = output_poly_eval_prev.unwrap();
-    let public_output_poly_eval =
-      AllocatedNum::alloc_input(cs.namespace(|| "public_output_poly_eval"), || {
-        Ok(self.public_output_poly_eval)
-      })?;
-    cs.enforce(
-      || "public_output_poly_eval equality",
-      |lc| lc + CS::one(),
-      |lc| lc + output_poly_eval.get_variable(),
-      |lc| lc + public_output_poly_eval.get_variable(),
-    );
 
     Ok(())
   }
@@ -993,8 +935,8 @@ mod tests {
       .collect()
   }
 
-  fn polynomial_evaluation(bytes: &[u8], challenge: Scalar) -> Scalar {
-    let packed: Vec<Scalar> = bytes
+  fn packed_field_elements(bytes: &[u8]) -> Vec<Scalar> {
+    bytes
       .chunks(BYTES_PER_FIELD_ELEMENT)
       .map(|chunk| {
         chunk
@@ -1007,7 +949,11 @@ mod tests {
           })
           .0
       })
-      .collect();
+      .collect()
+  }
+
+  fn polynomial_evaluation(bytes: &[u8], challenge: Scalar) -> Scalar {
+    let packed = packed_field_elements(bytes);
     packed.iter().skip(1).fold(packed[0], |evaluation, value| {
       evaluation * challenge + value
     })
@@ -1034,16 +980,14 @@ mod tests {
       .map(|row| row.iter().map(|value| (value >> 32) as u8).collect())
       .collect();
     let input_challenge = scalar(37);
-    let output_challenge = scalar(41);
 
     GaussianBlurCircuit {
       public_input_poly_eval: polynomial_evaluation(
         &image.iter().flatten().copied().collect::<Vec<_>>(),
         input_challenge,
       ),
-      public_output_poly_eval: polynomial_evaluation(
+      public_output_packed: packed_field_elements(
         &edited_image.iter().flatten().copied().collect::<Vec<_>>(),
-        output_challenge,
       ),
       target_image: edited_image.clone(),
       image,
@@ -1053,7 +997,6 @@ mod tests {
       logup_challenge_1: scalar(1_000_000),
       logup_challenge_2: scalar(2_000_000),
       input_polynomial_interpolation_challenge: input_challenge,
-      output_polynomial_interpolation_challenge: output_challenge,
       convolution_result,
     }
   }
@@ -1173,23 +1116,24 @@ mod tests {
 
     let public_values =
       <GaussianBlurCircuit<Scalar> as SpartanCircuit<E>>::public_values(&circuit).unwrap();
+    let mut expected = vec![
+      scalar(11),
+      scalar(13),
+      scalar(17),
+      scalar(19),
+      scalar(23),
+      scalar(1_000_000),
+      scalar(2_000_000),
+      scalar(37),
+      circuit.public_input_poly_eval,
+    ];
+    expected.extend(circuit.public_output_packed.clone());
+
+    assert_eq!(public_values, expected);
     assert_eq!(
-      public_values,
-      vec![
-        scalar(11),
-        scalar(13),
-        scalar(17),
-        scalar(19),
-        scalar(23),
-        scalar(1_000_000),
-        scalar(2_000_000),
-        scalar(37),
-        circuit.public_input_poly_eval,
-        scalar(41),
-        circuit.public_output_poly_eval,
-      ],
+      public_values.len(),
+      circuit.r.len() + circuit.s.len() + 4 + circuit.public_output_packed.len()
     );
-    assert_eq!(public_values.len(), circuit.r.len() + circuit.s.len() + 6);
   }
 
   #[test]
@@ -1213,7 +1157,7 @@ mod tests {
     let width = circuit.image[0].len();
     let pixels = height * width;
     let constraints_before_derived_products =
-      7 * pixels + 2 * height + 2 * pixels.div_ceil(BYTES_PER_FIELD_ELEMENT) + 65_797;
+      7 * pixels + 2 * height + 2 * pixels.div_ceil(BYTES_PER_FIELD_ELEMENT) + 65_796;
     assert_eq!(
       cs.num_constraints(),
       constraints_before_derived_products + height + width,
