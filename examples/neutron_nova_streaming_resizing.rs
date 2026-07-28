@@ -4,7 +4,7 @@
 //   RUST_LOG=neutron_nova_streaming_resizing=info,spartan2::neutronnova_zk_streaming=info RUSTFLAGS="-C target-cpu=native" cargo run --example neutron_nova_streaming_resizing --release
 //
 // Verification is measured repeatedly across a fixed ladder of rayon thread counts (the default
-// pool, then 8, 4, and 1) to show how the verifier scales. Setup, witness generation, and prove
+// pool, then 16, 8, 4, and 1) to show how the verifier scales. Setup, witness generation, and prove
 // always use the global pool, so only the verifier's scaling is isolated.
 
 #![allow(non_snake_case)]
@@ -30,7 +30,7 @@ const NUM_FRAMES: usize = 4;
 const NUM_CIRCUITS: usize = NUM_FRAMES * 3;
 const IMAGE_DIMS: (usize, usize) = (1280, 720);
 /// Thread counts verification is benchmarked at. `None` is rayon's default global pool.
-const VERIFY_THREAD_LADDER: [Option<usize>; 4] = [None, Some(8), Some(4), Some(1)];
+const VERIFY_THREAD_LADDER: [Option<usize>; 5] = [None, Some(16), Some(8), Some(4), Some(1)];
 
 fn main() {
   let _ = tracing_subscriber::fmt()

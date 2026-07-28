@@ -11,7 +11,7 @@
 // Optionally override the Powers-of-Tau file:
 //   SPARTAN2_HYPERKZG_PTAU=video_data/ppot_0080_24.ptau
 // Verification is measured repeatedly across a fixed ladder of rayon thread counts (the default
-// pool, then 8, 4, and 1) to show how the verifier scales. Setup, witness generation, and prove
+// pool, then 16, 8, 4, and 1) to show how the verifier scales. Setup, witness generation, and prove
 // always use the global pool, so only the verifier's scaling is isolated.
 // The RUST_LOG is because the Spartan library has a bunch of unnecessary print statements for large
 // circuits internally.
@@ -45,7 +45,7 @@ fn parse_usize_env(name: &str, default: usize) -> usize {
 }
 
 /// Thread counts verification is benchmarked at. `None` is rayon's default global pool.
-const VERIFY_THREAD_LADDER: [Option<usize>; 4] = [None, Some(8), Some(4), Some(1)];
+const VERIFY_THREAD_LADDER: [Option<usize>; 5] = [None, Some(16), Some(8), Some(4), Some(1)];
 
 fn main() {
   let _ = tracing_subscriber::fmt()

@@ -887,10 +887,10 @@ impl<E: Engine> SpartanCircuit<E> for GaussianBlurCircuit<E::Scalar> {
         coeff = coeff * E::Scalar::from_u128(1u128 << 8);
       }
 
-      let public_output_packed_var = AllocatedNum::alloc_input(
-        cs.namespace(|| format!("public_output_packed {k}")),
-        || Ok(scalar),
-      )?;
+      let public_output_packed_var =
+        AllocatedNum::alloc_input(cs.namespace(|| format!("public_output_packed {k}")), || {
+          Ok(scalar)
+        })?;
 
       cs.enforce(
         || format!("public_output_packed constraint {k}"),
