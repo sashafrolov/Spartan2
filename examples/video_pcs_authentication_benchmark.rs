@@ -313,7 +313,7 @@ fn run_authentication_phase(
     .map(|(record, _)| record)
     .collect::<Vec<_>>();
 
-  let horner_evals = if config.parallel_verification {
+  let 1s = if config.parallel_verification {
     let t0 = Instant::now();
     let horner_evals = polynomials
       .par_iter()
