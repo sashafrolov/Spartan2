@@ -318,8 +318,11 @@ impl<T: SerializeRaw + DeserializeRaw> FileVec<T> {
         if more_than_one_batch || batch_is_larger_than_buffer {
             let byte_buffer = byte_buffer.as_mut().unwrap();
             let mut file = file.unwrap();
-            T::serialize_raw_batch(&buffer, byte_buffer, &file).unwrap();
+            let offset = file.position() as u64;
+            let actual = T::serialize_raw_batch_padded(&buffer, byte_buffer, &file).unwrap();
             file.flush().expect("failed to flush file");
+            file.truncate(offset + actual as u64)
+                .expect("failed to truncate file");
             file.rewind().expect("failed to seek file");
             Self::File(file)
         } else {
@@ -393,9 +396,12 @@ impl<T: SerializeRaw + DeserializeRaw> FileVec<T> {
         if more_than_one_batch || batch_is_larger_than_buffer {
             let byte_buffer = byte_buffer.as_mut().unwrap();
             let mut file = file.unwrap();
-            T::serialize_raw_batch(&buffer, byte_buffer, &file).unwrap();
+            let offset = file.position() as u64;
+            let actual = T::serialize_raw_batch_padded(&buffer, byte_buffer, &file).unwrap();
             vec_result.extend_from_slice(&buffer);
             file.flush().expect("failed to flush file");
+            file.truncate(offset + actual as u64)
+                .expect("failed to truncate file");
             file.rewind().expect("failed to seek file");
             (vec_result, Self::File(file))
         } else {
@@ -559,13 +565,21 @@ impl<T: SerializeRaw + DeserializeRaw> FileVec<T> {
                 file_1.allocate_space(s * A::SIZE).unwrap();
                 file_2.allocate_space(s * B::SIZE).unwrap();
             }
-            A::serialize_raw_batch(&bufs.0, &mut writer_1, &file_1).unwrap();
-            B::serialize_raw_batch(&bufs.1, &mut writer_2, &file_2).unwrap();
+            let offset_1 = file_1.position() as u64;
+            let offset_2 = file_2.position() as u64;
+            let actual_1 = A::serialize_raw_batch_padded(&bufs.0, &mut writer_1, &file_1).unwrap();
+            let actual_2 = B::serialize_raw_batch_padded(&bufs.1, &mut writer_2, &file_2).unwrap();
 
             bufs.0.clear();
             bufs.1.clear();
             file_1.flush().expect("failed to flush file");
             file_2.flush().expect("failed to flush file");
+            file_1
+                .truncate(offset_1 + actual_1 as u64)
+                .expect("failed to truncate file");
+            file_2
+                .truncate(offset_2 + actual_2 as u64)
+                .expect("failed to truncate file");
             file_1.rewind().expect("failed to seek file");
             file_2.rewind().expect("failed to seek file");
             let v1: FileVec<A> = FileVec::new_file(file_1);
@@ -658,9 +672,12 @@ impl<T: SerializeRaw + DeserializeRaw> FileVec<T> {
                 file_2.allocate_space(s * B::SIZE).unwrap();
                 file_3.allocate_space(s * C::SIZE).unwrap();
             }
-            A::serialize_raw_batch(&buf_a, &mut writer_1, &file_1).unwrap();
-            B::serialize_raw_batch(&buf_b, &mut writer_2, &file_2).unwrap();
-            C::serialize_raw_batch(&buf_c, &mut writer_3, &file_3).unwrap();
+            let offset_1 = file_1.position() as u64;
+            let offset_2 = file_2.position() as u64;
+            let offset_3 = file_3.position() as u64;
+            let actual_1 = A::serialize_raw_batch_padded(&buf_a, &mut writer_1, &file_1).unwrap();
+            let actual_2 = B::serialize_raw_batch_padded(&buf_b, &mut writer_2, &file_2).unwrap();
+            let actual_3 = C::serialize_raw_batch_padded(&buf_c, &mut writer_3, &file_3).unwrap();
 
             buf_a.clear();
             buf_b.clear();
@@ -668,10 +685,23 @@ impl<T: SerializeRaw + DeserializeRaw> FileVec<T> {
             file_1.flush().expect("failed to flush file");
             file_2.flush().expect("failed to flush file");
             file_3.flush().expect("failed to flush file");
+            file_1
+                .truncate(offset_1 + actual_1 as u64)
+                .expect("failed to truncate file");
+            file_2
+                .truncate(offset_2 + actual_2 as u64)
+                .expect("failed to truncate file");
+            file_3
+                .truncate(offset_3 + actual_3 as u64)
+                .expect("failed to truncate file");
             file_1.rewind().expect("failed to seek file");
             file_2.rewind().expect("failed to seek file");
             file_3.rewind().expect("failed to seek file");
-            (FileVec::new_file(file_1), FileVec::new_file(file_2), FileVec::new_file(file_3))
+            (
+                FileVec::new_file(file_1),
+                FileVec::new_file(file_2),
+                FileVec::new_file(file_3),
+            )
         } else {
             let _ = file_1.remove();
             let _ = file_2.remove();

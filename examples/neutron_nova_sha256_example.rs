@@ -9,7 +9,7 @@
 mod sha256_circuit;
 
 use sha256_circuit::Sha256Circuit;
-use spartan2::{neutronnova_zk::NeutronNovaZkSNARK, provider::T256HyraxEngine};
+use spartan2::{neutronnova_zk::NeutronNovaZkSNARK, provider::Bn254KzgEngine};
 use std::time::Instant;
 use tracing::{info, info_span};
 
@@ -27,7 +27,7 @@ fn main() {
     .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
     .try_init();
 
-  type E = T256HyraxEngine;
+  type E = Bn254KzgEngine;
 
   let root_span = info_span!(
     "bench",

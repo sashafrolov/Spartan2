@@ -1,7 +1,7 @@
-// NeutronNova grayscaling with the streaming version. Fold a bunch of keyframe proofs together.
+// NeutronNova masking with the streaming version. Fold a proof for each video frame.
 //
 // Run with:
-//   RUST_LOG=neutron_nova_streaming_grayscaling=info,spartan2::neutronnova_zk_streaming=info RUSTFLAGS="-C target-cpu=native" cargo run --example neutron_nova_streaming_grayscaling --release
+//   RUST_LOG=neutron_nova_streaming_masking=info,spartan2::neutronnova_zk_streaming=info RUSTFLAGS="-C target-cpu=native" cargo run --example neutron_nova_streaming_masking --release
 //
 // Verification is measured repeatedly across a fixed ladder of rayon thread counts (the default
 // pool, then 16, 8, 4, and 1) to show how the verifier scales. Setup, witness generation, and prove
@@ -10,11 +10,11 @@
 #![allow(non_snake_case)]
 #[path = "circuits/dummy_circuit.rs"]
 mod dummy_circuit;
-#[path = "circuits/grayscale_circuit.rs"]
-mod grayscale_circuit;
+#[path = "circuits/mask_circuit.rs"]
+mod mask_circuit;
 
 use dummy_circuit::DummyCircuit;
-use grayscale_circuit::GrayscaleCircuit;
+use mask_circuit::MaskCircuit;
 use rayon::prelude::*;
 use spartan2::{
   bellpepper::{r1cs::SpartanShape, shape_cs::ShapeCS},
@@ -53,11 +53,11 @@ fn main() {
     num_circuits = NUM_CIRCUITS,
     image_height = IMAGE_DIMS.0,
     image_width = IMAGE_DIMS.1,
-    "starting NeutronNova streaming grayscaling benchmark"
+    "starting NeutronNova streaming masking benchmark"
   );
 
-  // Use a dummy circuit of the right shape to derive the R1CS constraints and keys.
-  let shape_circuit = GrayscaleCircuit::<<E as Engine>::Scalar>::new(&frame_path_format, 1);
+  // Use a circuit with the right shape to derive the R1CS constraints and keys.
+  let shape_circuit = MaskCircuit::<<E as Engine>::Scalar>::new(&frame_path_format, 1);
   let [
     num_cons_unpadded,
     num_shared_unpadded,
@@ -99,13 +99,10 @@ fn main() {
     .and_then(|v| v.parse().ok())
     .unwrap_or(0);
   let t0 = Instant::now();
-  let step_circuits: Vec<GrayscaleCircuit<<E as Engine>::Scalar>> = (0..NUM_CIRCUITS)
+  let step_circuits: Vec<MaskCircuit<<E as Engine>::Scalar>> = (0..NUM_CIRCUITS)
     .into_par_iter()
     .map(|i| {
-      GrayscaleCircuit::<<E as Engine>::Scalar>::new(
-        &frame_path_format,
-        (i + 1) as u64 + frame_offset,
-      )
+      MaskCircuit::<<E as Engine>::Scalar>::new(&frame_path_format, (i + 1) as u64 + frame_offset)
     })
     .collect();
   info!(elapsed_ms = t0.elapsed().as_millis(), "generate_witness");

@@ -13,7 +13,10 @@ use spartan2::traits::{Engine, circuit::SpartanCircuit};
 pub const BYTES_PER_FIELD_ELEMENT: usize = 30;
 pub const BYTES_PER_PIXEL: usize = 3;
 
-pub fn generate_random_vector<Scalar: PrimeField + PrimeFieldBits>(length: usize, seed: u64) -> Vec<Scalar> {
+pub fn generate_random_vector<Scalar: PrimeField + PrimeFieldBits>(
+  length: usize,
+  seed: u64,
+) -> Vec<Scalar> {
   let mut rng = StdRng::seed_from_u64(seed);
   (0..length)
     .map(|_| Scalar::from_u128(rng.gen_range(0..((1u128 << 127) as u128))))
@@ -24,7 +27,17 @@ pub fn generate_random_image(dimensions: (usize, usize), seed: u64) -> Vec<Vec<(
   let (height, width) = dimensions;
   let mut rng = StdRng::seed_from_u64(seed);
   (0..height)
-    .map(|_| (0..width).map(|_| (rng.next_u32() as u8, rng.next_u32() as u8, rng.next_u32() as u8)).collect())
+    .map(|_| {
+      (0..width)
+        .map(|_| {
+          (
+            rng.next_u32() as u8,
+            rng.next_u32() as u8,
+            rng.next_u32() as u8,
+          )
+        })
+        .collect()
+    })
     .collect()
 }
 
@@ -34,13 +47,10 @@ pub struct MaskCircuit<Scalar: PrimeField> {
   edited_image: Vec<Vec<(u8, u8, u8)>>,
   target_image: Vec<Vec<(u8, u8, u8)>>,
   mask: Vec<Vec<bool>>,
-  logup_challenge_1: Scalar,
   logup_challenge_2: Scalar,
-  logup_challenge_3: Scalar,
   input_polynomial_interpolation_challenge: Scalar,
-  output_polynomial_interpolation_challenge: Scalar,
   public_input_poly_eval: Scalar,
-  public_output_poly_eval: Scalar,
+  public_output_packed: Vec<Scalar>,
 }
 
 impl<Scalar: PrimeField + PrimeFieldBits> MaskCircuit<Scalar> {
@@ -55,11 +65,10 @@ impl<Scalar: PrimeField + PrimeFieldBits> MaskCircuit<Scalar> {
     // The randomness generation feature in Spartan2 was kind of broken at the time of writing.
     // generating challenges like this for now, this has the same performance profile, but would need to be fixed.
     let base = (1u64 << 32) + 5 * index;
-    let input_polynomial_interpolation_challenge  = generate_random_vector(1, base + 1).remove(0);
-    let logup_challenge_1 = generate_random_vector(1, base + 2).remove(0);
+    let input_polynomial_interpolation_challenge = generate_random_vector(1, base + 1).remove(0);
+    // Offsets 2 and 4 previously fed two further LogUp challenges that no constraint ever
+    // used; only the byte-range check below is a LogUp, so only this one is drawn.
     let logup_challenge_2 = generate_random_vector(1, base + 3).remove(0);
-    let logup_challenge_3 = generate_random_vector(1, base + 4).remove(0);
-    let output_polynomial_interpolation_challenge = generate_random_vector(1, base + 5).remove(0);
 
     // Evaluate the input image polynomial interpolation.
     let flat_image_vals: Vec<(u8, u8, u8)> = image.iter().flatten().copied().collect();
@@ -84,17 +93,26 @@ impl<Scalar: PrimeField + PrimeFieldBits> MaskCircuit<Scalar> {
         acc * input_polynomial_interpolation_challenge + s
       });
 
-    let edited_image: Vec<Vec<(u8, u8, u8)>> = image.iter().zip(mask.iter()).map(|(row, mask_row)| {
-      row.iter().zip(mask_row.iter()).map(|(&pixel, &masked)| {
-        if masked { (0, 0, 0) } else { pixel }
-      }).collect()
-    }).collect();
+    let mask = vec![vec![false; width]; height];
 
-    // Evaluate the output image output interpolation. Note: this is a bit of a hack,
-    // it turns out that having large public outputs leads to some bottlenecks
-    // for verification (a large serial hash and evaluating the MLEs of large vectors).
+    let edited_image: Vec<Vec<(u8, u8, u8)>> = image
+      .iter()
+      .zip(mask.iter())
+      .map(|(row, mask_row)| {
+        row
+          .iter()
+          .zip(mask_row.iter())
+          .map(|(&pixel, &masked)| if masked { (0, 0, 0) } else { pixel })
+          .collect()
+      })
+      .collect();
+
+    // Pack the edited image into field elements. These packed values are themselves the
+    // public output rather than a Horner evaluation of them: an evaluation at a challenge
+    // the prover picks binds nothing, so the verifier has to receive the packed values
+    // directly. Packing keeps that ~30x smaller than raw pixel values.
     let flat_edited_vals: Vec<(u8, u8, u8)> = edited_image.iter().flatten().copied().collect();
-    let mut packed_output_scalars: Vec<Scalar> = Vec::new();
+    let mut public_output_packed: Vec<Scalar> = Vec::new();
     for chunk_vals in flat_edited_vals.chunks(BYTES_PER_FIELD_ELEMENT / BYTES_PER_PIXEL) {
       let mut scalar = Scalar::ZERO;
       let mut coeff = Scalar::ONE;
@@ -106,30 +124,19 @@ impl<Scalar: PrimeField + PrimeFieldBits> MaskCircuit<Scalar> {
         scalar = scalar + coeff * Scalar::from_u128(val2 as u128);
         coeff = coeff * Scalar::from_u128(1u128 << 8);
       }
-      packed_output_scalars.push(scalar);
+      public_output_packed.push(scalar);
     }
-    let public_output_poly_eval = packed_output_scalars
-      .iter()
-      .skip(1)
-      .fold(packed_output_scalars[0], |acc, s| {
-        acc * output_polynomial_interpolation_challenge + s
-      });
     let target_image = edited_image.clone();
-
-    let mask = vec![vec![false; width]; height];
 
     Self {
       image,
       edited_image,
       target_image,
       mask,
-      logup_challenge_1,
       logup_challenge_2,
-      logup_challenge_3,
       input_polynomial_interpolation_challenge,
-      output_polynomial_interpolation_challenge,
       public_input_poly_eval,
-      public_output_poly_eval,
+      public_output_packed,
     }
   }
 }
@@ -143,13 +150,10 @@ impl<E: Engine> SpartanCircuit<E> for MaskCircuit<E::Scalar> {
 
     let mut public_vals = Vec::new();
 
-    public_vals.push(self.logup_challenge_1);
     public_vals.push(self.logup_challenge_2);
-    public_vals.push(self.logup_challenge_3);
     public_vals.push(self.input_polynomial_interpolation_challenge);
     public_vals.push(self.public_input_poly_eval);
-    public_vals.push(self.output_polynomial_interpolation_challenge);
-    public_vals.push(self.public_output_poly_eval);
+    public_vals.extend(self.public_output_packed.clone());
 
     Ok(public_vals)
   }
@@ -210,25 +214,55 @@ impl<E: Engine> SpartanCircuit<E> for MaskCircuit<E::Scalar> {
       .collect::<Result<Vec<Vec<_>>, SynthesisError>>()?;
 
     // 2. Allocate edited_image as private.
-    let mut allocated_edited_image: Vec<Vec<(AllocatedNum<E::Scalar>, AllocatedNum<E::Scalar>, AllocatedNum<E::Scalar>)>> = Vec::new();
+    let mut allocated_edited_image: Vec<
+      Vec<(
+        AllocatedNum<E::Scalar>,
+        AllocatedNum<E::Scalar>,
+        AllocatedNum<E::Scalar>,
+      )>,
+    > = Vec::new();
     for (i, row) in self.edited_image.clone().into_iter().enumerate() {
       let mut row_vars = Vec::new();
       for (j, (val0, val1, val2)) in row.into_iter().enumerate() {
-        let n0 = AllocatedNum::alloc(cs.namespace(|| format!("edited image entry {i} {j} channel 0")), || Ok(E::Scalar::from_u128(val0 as u128)))?;
-        let n1 = AllocatedNum::alloc(cs.namespace(|| format!("edited image entry {i} {j} channel 1")), || Ok(E::Scalar::from_u128(val1 as u128)))?;
-        let n2 = AllocatedNum::alloc(cs.namespace(|| format!("edited image entry {i} {j} channel 2")), || Ok(E::Scalar::from_u128(val2 as u128)))?;
+        let n0 = AllocatedNum::alloc(
+          cs.namespace(|| format!("edited image entry {i} {j} channel 0")),
+          || Ok(E::Scalar::from_u128(val0 as u128)),
+        )?;
+        let n1 = AllocatedNum::alloc(
+          cs.namespace(|| format!("edited image entry {i} {j} channel 1")),
+          || Ok(E::Scalar::from_u128(val1 as u128)),
+        )?;
+        let n2 = AllocatedNum::alloc(
+          cs.namespace(|| format!("edited image entry {i} {j} channel 2")),
+          || Ok(E::Scalar::from_u128(val2 as u128)),
+        )?;
         row_vars.push((n0, n1, n2));
       }
       allocated_edited_image.push(row_vars);
     }
 
-    let mut allocated_target_image: Vec<Vec<(AllocatedNum<E::Scalar>, AllocatedNum<E::Scalar>, AllocatedNum<E::Scalar>)>> = Vec::new();
+    let mut allocated_target_image: Vec<
+      Vec<(
+        AllocatedNum<E::Scalar>,
+        AllocatedNum<E::Scalar>,
+        AllocatedNum<E::Scalar>,
+      )>,
+    > = Vec::new();
     for (i, row) in self.target_image.clone().into_iter().enumerate() {
       let mut row_vars = Vec::new();
       for (j, (val0, val1, val2)) in row.into_iter().enumerate() {
-        let n0 = AllocatedNum::alloc(cs.namespace(|| format!("target image entry {i} {j} channel 0")), || Ok(E::Scalar::from_u128(val0 as u128)))?;
-        let n1 = AllocatedNum::alloc(cs.namespace(|| format!("target image entry {i} {j} channel 1")), || Ok(E::Scalar::from_u128(val1 as u128)))?;
-        let n2 = AllocatedNum::alloc(cs.namespace(|| format!("target image entry {i} {j} channel 2")), || Ok(E::Scalar::from_u128(val2 as u128)))?;
+        let n0 = AllocatedNum::alloc(
+          cs.namespace(|| format!("target image entry {i} {j} channel 0")),
+          || Ok(E::Scalar::from_u128(val0 as u128)),
+        )?;
+        let n1 = AllocatedNum::alloc(
+          cs.namespace(|| format!("target image entry {i} {j} channel 1")),
+          || Ok(E::Scalar::from_u128(val1 as u128)),
+        )?;
+        let n2 = AllocatedNum::alloc(
+          cs.namespace(|| format!("target image entry {i} {j} channel 2")),
+          || Ok(E::Scalar::from_u128(val2 as u128)),
+        )?;
         row_vars.push((n0, n1, n2));
       }
       allocated_target_image.push(row_vars);
@@ -239,10 +273,9 @@ impl<E: Engine> SpartanCircuit<E> for MaskCircuit<E::Scalar> {
     for (i, row) in self.mask.iter().enumerate() {
       let mut row_vars = Vec::new();
       for (j, &val) in row.iter().enumerate() {
-        let n = AllocatedNum::alloc(
-          cs.namespace(|| format!("mask entry {i} {j}")),
-          || Ok(E::Scalar::from_u128(val as u128)),
-        )?;
+        let n = AllocatedNum::alloc(cs.namespace(|| format!("mask entry {i} {j}")), || {
+          Ok(E::Scalar::from_u128(val as u128))
+        })?;
         cs.enforce(
           || format!("mask boolean constraint {i} {j}"),
           |lc| lc + n.get_variable(),
@@ -258,7 +291,8 @@ impl<E: Engine> SpartanCircuit<E> for MaskCircuit<E::Scalar> {
     let pixel_pack_lcs: Vec<Vec<LinearCombination<E::Scalar>>> = image_input_vars
       .iter()
       .map(|row| {
-        row.iter()
+        row
+          .iter()
           .map(|(n0, n1, n2)| {
             LinearCombination::zero()
               + (E::Scalar::from(1u64 << 16), n0.get_variable())
@@ -269,24 +303,30 @@ impl<E: Engine> SpartanCircuit<E> for MaskCircuit<E::Scalar> {
       })
       .collect();
 
-    let target_image_pixel_pack_lcs: Vec<Vec<LinearCombination<E::Scalar>>> = allocated_target_image
-      .iter()
-      .map(|row| {
-        row.iter()
-          .map(|(n0, n1, n2)| {
-            LinearCombination::zero()
-              + (E::Scalar::from(1u64 << 16), n0.get_variable())
-              + (E::Scalar::from(1u64 << 8), n1.get_variable())
-              + (E::Scalar::from(1u64), n2.get_variable())
-          })
-          .collect()
-      })
-      .collect();
+    let target_image_pixel_pack_lcs: Vec<Vec<LinearCombination<E::Scalar>>> =
+      allocated_target_image
+        .iter()
+        .map(|row| {
+          row
+            .iter()
+            .map(|(n0, n1, n2)| {
+              LinearCombination::zero()
+                + (E::Scalar::from(1u64 << 16), n0.get_variable())
+                + (E::Scalar::from(1u64 << 8), n1.get_variable())
+                + (E::Scalar::from(1u64), n2.get_variable())
+            })
+            .collect()
+        })
+        .collect();
 
     // 5. Do the masking operation
     for (i, (pixel_row, (target_row, mask_row))) in pixel_pack_lcs
       .iter()
-      .zip(target_image_pixel_pack_lcs.iter().zip(allocated_mask.iter()))
+      .zip(
+        target_image_pixel_pack_lcs
+          .iter()
+          .zip(allocated_mask.iter()),
+      )
       .enumerate()
     {
       for (j, (pixel_lc, (target_lc, mask_var))) in pixel_row
@@ -313,69 +353,79 @@ impl<E: Engine> SpartanCircuit<E> for MaskCircuit<E::Scalar> {
     let mut logup_prev_2: Option<AllocatedNum<E::Scalar>> = None;
     let mut logup_running_sum_2 = E::Scalar::ZERO;
     for (i, row) in image_input_vars.iter().enumerate() {
-        for (j, (n0, n1, n2)) in row.iter().enumerate() {
-            let (val0, val1, val2) = self.image[i][j];
-            for (c, (channel_val, channel_var)) in [(val0, n0), (val1, n1), (val2, n2)].into_iter().enumerate() {
-                logup_multiplicities_2[channel_val as usize] += 1;
-                let denom_val = self.logup_challenge_2 + E::Scalar::from_u128(channel_val as u128);
-                logup_running_sum_2 = logup_running_sum_2 + denom_val.invert().unwrap_or(E::Scalar::ZERO);
+      for (j, (n0, n1, n2)) in row.iter().enumerate() {
+        let (val0, val1, val2) = self.image[i][j];
+        for (c, (channel_val, channel_var)) in
+          [(val0, n0), (val1, n1), (val2, n2)].into_iter().enumerate()
+        {
+          logup_multiplicities_2[channel_val as usize] += 1;
+          let denom_val = self.logup_challenge_2 + E::Scalar::from_u128(channel_val as u128);
+          logup_running_sum_2 = logup_running_sum_2 + denom_val.invert().unwrap_or(E::Scalar::ZERO);
 
-                let partial_sum_var = AllocatedNum::alloc(
-                cs.namespace(|| format!("Byte Check LogUp partial sum {i} {j} {c}")),
-                || Ok(logup_running_sum_2),
-                )?;
+          let partial_sum_var = AllocatedNum::alloc(
+            cs.namespace(|| format!("Byte Check LogUp partial sum {i} {j} {c}")),
+            || Ok(logup_running_sum_2),
+          )?;
 
-                if let Some(prev) = &logup_prev_2 {
-                cs.enforce(
-                    || format!("Byte Check LogUp partial sum constraint {i} {j} {c}"),
-                    |lc| lc + partial_sum_var.get_variable() - prev.get_variable(),
-                    |lc| lc + allocated_logup_challenge_2.get_variable() + channel_var.get_variable(),
-                    |lc| lc + CS::one(),
-                );
-                } else {
-                cs.enforce(
-                    || format!("Byte Check LogUp partial sum constraint {i} {j} {c}"),
-                    |lc| lc + partial_sum_var.get_variable(),
-                    |lc| lc + allocated_logup_challenge_2.get_variable() + channel_var.get_variable(),
-                    |lc| lc + CS::one(),
-                );
-                }
+          if let Some(prev) = &logup_prev_2 {
+            cs.enforce(
+              || format!("Byte Check LogUp partial sum constraint {i} {j} {c}"),
+              |lc| lc + partial_sum_var.get_variable() - prev.get_variable(),
+              |lc| lc + allocated_logup_challenge_2.get_variable() + channel_var.get_variable(),
+              |lc| lc + CS::one(),
+            );
+          } else {
+            cs.enforce(
+              || format!("Byte Check LogUp partial sum constraint {i} {j} {c}"),
+              |lc| lc + partial_sum_var.get_variable(),
+              |lc| lc + allocated_logup_challenge_2.get_variable() + channel_var.get_variable(),
+              |lc| lc + CS::one(),
+            );
+          }
 
-                logup_prev_2 = Some(partial_sum_var);
-            }
+          logup_prev_2 = Some(partial_sum_var);
         }
+      }
     }
-    for (i, (alloc_row, val_row)) in allocated_edited_image.iter().zip(self.edited_image.iter()).enumerate() {
-        for (j, ((n0, n1, n2), &(val0, val1, val2))) in alloc_row.iter().zip(val_row.iter()).enumerate() {
-            for (c, (channel_val, channel_var)) in [(val0, n0), (val1, n1), (val2, n2)].into_iter().enumerate() {
-                logup_multiplicities_2[channel_val as usize] += 1;
-                let denom_val = self.logup_challenge_2 + E::Scalar::from_u128(channel_val as u128);
-                logup_running_sum_2 = logup_running_sum_2 + denom_val.invert().unwrap_or(E::Scalar::ZERO);
+    for (i, (alloc_row, val_row)) in allocated_edited_image
+      .iter()
+      .zip(self.edited_image.iter())
+      .enumerate()
+    {
+      for (j, ((n0, n1, n2), &(val0, val1, val2))) in
+        alloc_row.iter().zip(val_row.iter()).enumerate()
+      {
+        for (c, (channel_val, channel_var)) in
+          [(val0, n0), (val1, n1), (val2, n2)].into_iter().enumerate()
+        {
+          logup_multiplicities_2[channel_val as usize] += 1;
+          let denom_val = self.logup_challenge_2 + E::Scalar::from_u128(channel_val as u128);
+          logup_running_sum_2 = logup_running_sum_2 + denom_val.invert().unwrap_or(E::Scalar::ZERO);
 
-                let partial_sum_var = AllocatedNum::alloc(
-                    cs.namespace(|| format!("Byte Check LogUp partial sum {i} {j} {c} edited")),
-                    || Ok(logup_running_sum_2),
-                )?;
+          let partial_sum_var = AllocatedNum::alloc(
+            cs.namespace(|| format!("Byte Check LogUp partial sum {i} {j} {c} edited")),
+            || Ok(logup_running_sum_2),
+          )?;
 
-                if let Some(prev) = &logup_prev_2 {
-                    cs.enforce(
-                        || format!("Byte Check LogUp partial sum constraint {i} {j} {c} edited"),
-                        |lc| lc + partial_sum_var.get_variable() - prev.get_variable(),
-                        |lc| lc + allocated_logup_challenge_2.get_variable() + channel_var.get_variable(),
-                        |lc| lc + CS::one(),
-                    );
-                } else {
-                    cs.enforce(
-                        || format!("Byte Check LogUp partial sum constraint {i} {j} {c} edited"),
-                        |lc| lc + partial_sum_var.get_variable(),
-                        |lc| lc + allocated_logup_challenge_2.get_variable() + channel_var.get_variable(),
-                        |lc| lc + CS::one(),
-                    );
-                }
+          if let Some(prev) = &logup_prev_2 {
+            cs.enforce(
+              || format!("Byte Check LogUp partial sum constraint {i} {j} {c} edited"),
+              |lc| lc + partial_sum_var.get_variable() - prev.get_variable(),
+              |lc| lc + allocated_logup_challenge_2.get_variable() + channel_var.get_variable(),
+              |lc| lc + CS::one(),
+            );
+          } else {
+            cs.enforce(
+              || format!("Byte Check LogUp partial sum constraint {i} {j} {c} edited"),
+              |lc| lc + partial_sum_var.get_variable(),
+              |lc| lc + allocated_logup_challenge_2.get_variable() + channel_var.get_variable(),
+              |lc| lc + CS::one(),
+            );
+          }
 
-                logup_prev_2 = Some(partial_sum_var);
-            }
+          logup_prev_2 = Some(partial_sum_var);
         }
+      }
     }
     let lhs_logup_sum_2 = logup_prev_2.unwrap();
 
@@ -401,14 +451,18 @@ impl<E: Engine> SpartanCircuit<E> for MaskCircuit<E::Scalar> {
         cs.enforce(
           || format!("RHS Byte Check LogUp partial sum constraint {b}"),
           |lc| lc + partial_sum_var.get_variable() - prev.get_variable(),
-          |lc| lc + allocated_logup_challenge_2.get_variable() + (E::Scalar::from_u128(b), CS::one()),
+          |lc| {
+            lc + allocated_logup_challenge_2.get_variable() + (E::Scalar::from_u128(b), CS::one())
+          },
           |lc| lc + mult_var.get_variable(),
         );
       } else {
         cs.enforce(
           || format!("RHS Byte Check LogUp partial sum constraint {b}"),
           |lc| lc + partial_sum_var.get_variable(),
-          |lc| lc + allocated_logup_challenge_2.get_variable() + (E::Scalar::from_u128(b), CS::one()),
+          |lc| {
+            lc + allocated_logup_challenge_2.get_variable() + (E::Scalar::from_u128(b), CS::one())
+          },
           |lc| lc + mult_var.get_variable(),
         );
       }
@@ -469,11 +523,13 @@ impl<E: Engine> SpartanCircuit<E> for MaskCircuit<E::Scalar> {
 
     for (k, (lc, scalar)) in packed_lcs.iter().zip(packed_scalars.iter()).enumerate() {
       if let Some(prev) = &input_poly_eval_prev {
-        input_poly_eval_scalar = input_poly_eval_scalar * self.input_polynomial_interpolation_challenge + scalar;
+        input_poly_eval_scalar =
+          input_poly_eval_scalar * self.input_polynomial_interpolation_challenge + scalar;
 
-        let input_eval_var = AllocatedNum::alloc(cs.namespace(|| format!("input poly eval {k}")), || {
-          Ok(input_poly_eval_scalar)
-        })?;
+        let input_eval_var =
+          AllocatedNum::alloc(cs.namespace(|| format!("input poly eval {k}")), || {
+            Ok(input_poly_eval_scalar)
+          })?;
 
         cs.enforce(
           || format!("input poly eval constraint {k}"),
@@ -486,9 +542,10 @@ impl<E: Engine> SpartanCircuit<E> for MaskCircuit<E::Scalar> {
       } else {
         input_poly_eval_scalar = *scalar;
 
-        let input_eval_var = AllocatedNum::alloc(cs.namespace(|| format!("input poly eval {k}")), || {
-          Ok(input_poly_eval_scalar)
-        })?;
+        let input_eval_var =
+          AllocatedNum::alloc(cs.namespace(|| format!("input poly eval {k}")), || {
+            Ok(input_poly_eval_scalar)
+          })?;
 
         cs.enforce(
           || format!("input poly eval constraint {k}"),
@@ -501,10 +558,10 @@ impl<E: Engine> SpartanCircuit<E> for MaskCircuit<E::Scalar> {
       }
     }
     let input_poly_eval = input_poly_eval_prev.unwrap();
-    let public_input_poly_eval = AllocatedNum::alloc_input(
-      cs.namespace(|| "public_input_poly_eval"),
-      || Ok(self.public_input_poly_eval),
-    )?;
+    let public_input_poly_eval =
+      AllocatedNum::alloc_input(cs.namespace(|| "public_input_poly_eval"), || {
+        Ok(self.public_input_poly_eval)
+      })?;
     cs.enforce(
       || "public_input_poly_eval equality",
       |lc| lc + CS::one(),
@@ -512,15 +569,11 @@ impl<E: Engine> SpartanCircuit<E> for MaskCircuit<E::Scalar> {
       |lc| lc + public_input_poly_eval.get_variable(),
     );
 
-    // 8. Do polynomial interpolation verification on the output.
-    // This is a bit of a hack. This NeutronNova implementation has some costs which scale kind of poorly
-    // in the size of the public inputs (the public transcript hashing is almost entirely serial), so this decreases those costs.
-    // Alternative solution could be to make a parallel `Transcript` implementation.
-    let allocated_output_polynomial_interpolation_challenge = AllocatedNum::alloc_input(
-      cs.namespace(|| "output_polynomial_interpolation_challenge"),
-      || Ok(self.output_polynomial_interpolation_challenge),
-    )?;
-
+    // 8. Expose the packed edited image as the circuit's public output.
+    // Each public value is constrained to equal a linear combination over BYTES_PER_FIELD_ELEMENT
+    // of the private edited-image variables, so every output byte is bound by the proof. This
+    // costs one public input per 10 pixels, which NeutronNova's largely serial transcript
+    // hashing is sensitive to, but it is the price of the output actually being committed.
     let flat_edited_vars: Vec<[&AllocatedNum<E::Scalar>; 3]> = allocated_edited_image
       .iter()
       .flatten()
@@ -528,12 +581,10 @@ impl<E: Engine> SpartanCircuit<E> for MaskCircuit<E::Scalar> {
       .collect();
     let flat_edited_vals: Vec<(u8, u8, u8)> = self.edited_image.iter().flatten().copied().collect();
 
-    let mut output_packed_lcs: Vec<LinearCombination<E::Scalar>> = Vec::new();
-    let mut output_packed_scalars: Vec<E::Scalar> = Vec::new();
-
-    for (chunk_vars, chunk_vals) in flat_edited_vars
+    for (k, (chunk_vars, chunk_vals)) in flat_edited_vars
       .chunks(BYTES_PER_FIELD_ELEMENT / BYTES_PER_PIXEL)
       .zip(flat_edited_vals.chunks(BYTES_PER_FIELD_ELEMENT / BYTES_PER_PIXEL))
+      .enumerate()
     {
       let mut lc = LinearCombination::zero();
       let mut scalar = E::Scalar::ZERO;
@@ -549,57 +600,19 @@ impl<E: Engine> SpartanCircuit<E> for MaskCircuit<E::Scalar> {
         scalar = scalar + coeff * E::Scalar::from_u128(val2 as u128);
         coeff = coeff * E::Scalar::from_u128(1u128 << 8);
       }
-      output_packed_lcs.push(lc);
-      output_packed_scalars.push(scalar);
-    }
 
-    let mut output_poly_eval_prev: Option<AllocatedNum<E::Scalar>> = None;
-    let mut output_poly_eval_scalar = E::Scalar::ZERO;
-
-    for (k, (lc, scalar)) in output_packed_lcs.iter().zip(output_packed_scalars.iter()).enumerate() {
-      if let Some(prev) = &output_poly_eval_prev {
-        output_poly_eval_scalar = output_poly_eval_scalar * self.output_polynomial_interpolation_challenge + scalar;
-
-        let output_eval_var = AllocatedNum::alloc(cs.namespace(|| format!("output poly eval {k}")), || {
-          Ok(output_poly_eval_scalar)
+      let public_output_packed_var =
+        AllocatedNum::alloc_input(cs.namespace(|| format!("public_output_packed {k}")), || {
+          Ok(scalar)
         })?;
 
-        cs.enforce(
-          || format!("output poly eval constraint {k}"),
-          |lc_a| lc_a + prev.get_variable(),
-          |lc_b| lc_b + allocated_output_polynomial_interpolation_challenge.get_variable(),
-          |lc_c| lc_c + output_eval_var.get_variable() - lc,
-        );
-
-        output_poly_eval_prev = Some(output_eval_var);
-      } else {
-        output_poly_eval_scalar = *scalar;
-
-        let output_eval_var = AllocatedNum::alloc(cs.namespace(|| format!("output poly eval {k}")), || {
-          Ok(output_poly_eval_scalar)
-        })?;
-
-        cs.enforce(
-          || format!("output poly eval constraint {k}"),
-          |lc_a| lc_a + output_eval_var.get_variable(),
-          |lc_b| lc_b + CS::one(),
-          |lc_c| lc_c + lc,
-        );
-
-        output_poly_eval_prev = Some(output_eval_var);
-      }
+      cs.enforce(
+        || format!("public_output_packed constraint {k}"),
+        |lc_a| lc_a + public_output_packed_var.get_variable(),
+        |lc_b| lc_b + CS::one(),
+        |lc_c| lc_c + &lc,
+      );
     }
-    let output_poly_eval = output_poly_eval_prev.unwrap();
-    let public_output_poly_eval = AllocatedNum::alloc_input(
-      cs.namespace(|| "public_output_poly_eval"),
-      || Ok(self.public_output_poly_eval),
-    )?;
-    cs.enforce(
-      || "public_output_poly_eval equality",
-      |lc| lc + CS::one(),
-      |lc| lc + output_poly_eval.get_variable(),
-      |lc| lc + public_output_poly_eval.get_variable(),
-    );
 
     Ok(())
   }

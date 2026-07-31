@@ -51,9 +51,8 @@ pub struct GrayscaleCircuit<Scalar: PrimeField> {
   logup_challenge_2: Scalar,
   logup_challenge_3: Scalar,
   input_polynomial_interpolation_challenge: Scalar,
-  output_polynomial_interpolation_challenge: Scalar,
   public_input_poly_eval: Scalar,
-  public_output_poly_eval: Scalar,
+  public_output_packed: Vec<Scalar>,
 }
 
 impl<Scalar: PrimeField + PrimeFieldBits> GrayscaleCircuit<Scalar> {
@@ -72,7 +71,6 @@ impl<Scalar: PrimeField + PrimeFieldBits> GrayscaleCircuit<Scalar> {
     let logup_challenge_1 = generate_random_vector(1, base + 2).remove(0);
     let logup_challenge_2 = generate_random_vector(1, base + 3).remove(0);
     let logup_challenge_3 = generate_random_vector(1, base + 4).remove(0);
-    let output_polynomial_interpolation_challenge = generate_random_vector(1, base + 5).remove(0);
 
     // Evaluate the input image polynomial interpolation.
     let flat_image_vals: Vec<(u8, u8, u8)> = image.iter().flatten().copied().collect();
@@ -107,11 +105,12 @@ impl<Scalar: PrimeField + PrimeFieldBits> GrayscaleCircuit<Scalar> {
       })
       .collect();
 
-    // Evaluate the output image output interpolation. Note: this is a bit of a hack,
-    // it turns out that having large public outputs leads to some bottlenecks
-    // for verification (a large serial hash and evaluating the MLEs of large vectors).
+    // Pack the edited image into field elements. These packed values are themselves the
+    // public output rather than a Horner evaluation of them: an evaluation at a challenge
+    // the prover picks binds nothing, so the verifier has to receive the packed values
+    // directly. Packing keeps that ~30x smaller than raw pixel values.
     let flat_edited_vals: Vec<u8> = edited_image.iter().flatten().copied().collect();
-    let mut packed_output_scalars: Vec<Scalar> = Vec::new();
+    let mut public_output_packed: Vec<Scalar> = Vec::new();
     for chunk_vals in flat_edited_vals.chunks(BYTES_PER_FIELD_ELEMENT) {
       let mut scalar = Scalar::ZERO;
       let mut coeff = Scalar::ONE;
@@ -119,14 +118,8 @@ impl<Scalar: PrimeField + PrimeFieldBits> GrayscaleCircuit<Scalar> {
         scalar = scalar + coeff * Scalar::from_u128(val as u128);
         coeff = coeff * Scalar::from_u128(1u128 << 8);
       }
-      packed_output_scalars.push(scalar);
+      public_output_packed.push(scalar);
     }
-    let public_output_poly_eval = packed_output_scalars
-      .iter()
-      .skip(1)
-      .fold(packed_output_scalars[0], |acc, s| {
-        acc * output_polynomial_interpolation_challenge + s
-      });
     let target_image = edited_image.clone();
 
     let jnd_map = vec![vec![8u8; width]; height];
@@ -140,9 +133,8 @@ impl<Scalar: PrimeField + PrimeFieldBits> GrayscaleCircuit<Scalar> {
       logup_challenge_2,
       logup_challenge_3,
       input_polynomial_interpolation_challenge,
-      output_polynomial_interpolation_challenge,
       public_input_poly_eval,
-      public_output_poly_eval,
+      public_output_packed,
     }
   }
 }
@@ -161,8 +153,7 @@ impl<E: Engine> SpartanCircuit<E> for GrayscaleCircuit<E::Scalar> {
     public_vals.push(self.logup_challenge_3);
     public_vals.push(self.input_polynomial_interpolation_challenge);
     public_vals.push(self.public_input_poly_eval);
-    public_vals.push(self.output_polynomial_interpolation_challenge);
-    public_vals.push(self.public_output_poly_eval);
+    public_vals.extend(self.public_output_packed.clone());
 
     Ok(public_vals)
   }
@@ -418,6 +409,13 @@ impl<E: Engine> SpartanCircuit<E> for GrayscaleCircuit<E::Scalar> {
         Ok(self.logup_challenge_2)
       })?;
 
+    // Allocated here rather than at its point of use in section 9 so that the public input
+    // order matches the order `public_values` reports the three challenges in.
+    let allocated_logup_challenge_3 =
+      AllocatedNum::alloc_input(cs.namespace(|| "LogUp challenge3"), || {
+        Ok(self.logup_challenge_3)
+      })?;
+
     let mut logup_prev_2: Option<AllocatedNum<E::Scalar>> = None;
     let mut logup_running_sum_2 = E::Scalar::ZERO;
     for (i, row) in image_input_vars.iter().enumerate() {
@@ -648,25 +646,19 @@ impl<E: Engine> SpartanCircuit<E> for GrayscaleCircuit<E::Scalar> {
       |lc| lc + public_input_poly_eval.get_variable(),
     );
 
-    // 8. Do polynomial interpolation verification on the output.
-    // This is a bit of a hack. This NeutronNova implementation has some costs which scale kind of poorly
-    // in the size of the public inputs (the public transcript hashing is almost entirely serial), so this decreases those costs.
-    // Alternative solution could be to make a parallel `Transcript` implementation.
-    let allocated_output_polynomial_interpolation_challenge = AllocatedNum::alloc_input(
-      cs.namespace(|| "output_polynomial_interpolation_challenge"),
-      || Ok(self.output_polynomial_interpolation_challenge),
-    )?;
-
+    // 8. Expose the packed edited image as the circuit's public output.
+    // Each public value is constrained to equal a linear combination over BYTES_PER_FIELD_ELEMENT
+    // of the private edited-image variables, so every output byte is bound by the proof. This
+    // costs one public input per 30 pixels, which NeutronNova's largely serial transcript
+    // hashing is sensitive to, but it is the price of the output actually being committed.
     let flat_edited_vars: Vec<&AllocatedNum<E::Scalar>> =
       allocated_edited_image.iter().flatten().collect();
     let flat_edited_vals: Vec<u8> = self.edited_image.iter().flatten().copied().collect();
 
-    let mut output_packed_lcs: Vec<LinearCombination<E::Scalar>> = Vec::new();
-    let mut output_packed_scalars: Vec<E::Scalar> = Vec::new();
-
-    for (chunk_vars, chunk_vals) in flat_edited_vars
+    for (k, (chunk_vars, chunk_vals)) in flat_edited_vars
       .chunks(BYTES_PER_FIELD_ELEMENT)
       .zip(flat_edited_vals.chunks(BYTES_PER_FIELD_ELEMENT))
+      .enumerate()
     {
       let mut lc = LinearCombination::zero();
       let mut scalar = E::Scalar::ZERO;
@@ -676,64 +668,19 @@ impl<E: Engine> SpartanCircuit<E> for GrayscaleCircuit<E::Scalar> {
         scalar = scalar + coeff * E::Scalar::from_u128(val as u128);
         coeff = coeff * E::Scalar::from_u128(1u128 << 8);
       }
-      output_packed_lcs.push(lc);
-      output_packed_scalars.push(scalar);
+
+      let public_output_packed_var =
+        AllocatedNum::alloc_input(cs.namespace(|| format!("public_output_packed {k}")), || {
+          Ok(scalar)
+        })?;
+
+      cs.enforce(
+        || format!("public_output_packed constraint {k}"),
+        |lc_a| lc_a + public_output_packed_var.get_variable(),
+        |lc_b| lc_b + CS::one(),
+        |lc_c| lc_c + &lc,
+      );
     }
-
-    let mut output_poly_eval_prev: Option<AllocatedNum<E::Scalar>> = None;
-    let mut output_poly_eval_scalar = E::Scalar::ZERO;
-
-    for (k, (lc, scalar)) in output_packed_lcs
-      .iter()
-      .zip(output_packed_scalars.iter())
-      .enumerate()
-    {
-      if let Some(prev) = &output_poly_eval_prev {
-        output_poly_eval_scalar =
-          output_poly_eval_scalar * self.output_polynomial_interpolation_challenge + scalar;
-
-        let output_eval_var =
-          AllocatedNum::alloc(cs.namespace(|| format!("output poly eval {k}")), || {
-            Ok(output_poly_eval_scalar)
-          })?;
-
-        cs.enforce(
-          || format!("output poly eval constraint {k}"),
-          |lc_a| lc_a + prev.get_variable(),
-          |lc_b| lc_b + allocated_output_polynomial_interpolation_challenge.get_variable(),
-          |lc_c| lc_c + output_eval_var.get_variable() - lc,
-        );
-
-        output_poly_eval_prev = Some(output_eval_var);
-      } else {
-        output_poly_eval_scalar = *scalar;
-
-        let output_eval_var =
-          AllocatedNum::alloc(cs.namespace(|| format!("output poly eval {k}")), || {
-            Ok(output_poly_eval_scalar)
-          })?;
-
-        cs.enforce(
-          || format!("output poly eval constraint {k}"),
-          |lc_a| lc_a + output_eval_var.get_variable(),
-          |lc_b| lc_b + CS::one(),
-          |lc_c| lc_c + lc,
-        );
-
-        output_poly_eval_prev = Some(output_eval_var);
-      }
-    }
-    let output_poly_eval = output_poly_eval_prev.unwrap();
-    let public_output_poly_eval =
-      AllocatedNum::alloc_input(cs.namespace(|| "public_output_poly_eval"), || {
-        Ok(self.public_output_poly_eval)
-      })?;
-    cs.enforce(
-      || "public_output_poly_eval equality",
-      |lc| lc + CS::one(),
-      |lc| lc + output_poly_eval.get_variable(),
-      |lc| lc + public_output_poly_eval.get_variable(),
-    );
 
     // 9. Do JND difference checking.
     let mut jnd_map_variables: Vec<Vec<AllocatedNum<E::Scalar>>> = Vec::new();
@@ -781,10 +728,6 @@ impl<E: Engine> SpartanCircuit<E> for GrayscaleCircuit<E::Scalar> {
       .collect();
 
     let mut logup_multiplicities_3: Vec<u32> = vec![0u32; 512];
-    let allocated_logup_challenge_3 =
-      AllocatedNum::alloc_input(cs.namespace(|| "LogUp challenge3"), || {
-        Ok(self.logup_challenge_3)
-      })?;
 
     let mut logup_prev_3: Option<AllocatedNum<E::Scalar>> = None;
     let mut logup_running_sum_3 = E::Scalar::ZERO;

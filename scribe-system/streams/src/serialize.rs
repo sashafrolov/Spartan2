@@ -12,7 +12,7 @@ use ark_ec::{
 use ark_ff::{AdditiveGroup, BigInt, Field, Fp, FpConfig, PrimeField};
 use ark_serialize::{Read, Write};
 
-use crate::file_vec::backend::ReadN;
+use crate::file_vec::backend::{PAGE_SIZE, ReadN};
 
 use super::file_vec::AVec;
 
@@ -21,18 +21,15 @@ pub trait SerializeRaw: Sized {
 
     fn serialize_raw(&self, writer: &mut &mut [u8]) -> Option<()>;
 
-    fn serialize_raw_batch(
-        result_buffer: &[Self],
-        work_buffer: &mut AVec,
-        mut file: impl crate::file_vec::WriteAligned,
-    ) -> Result<(), io::Error>
+    fn serialize_raw_batch_to_buffer(result_buffer: &[Self], work_buffer: &mut AVec)
     where
         Self: Sync + Send + Sized,
     {
-        if result_buffer.is_empty() {
-            return Ok(());
-        }
         work_buffer.clear();
+        if result_buffer.is_empty() {
+            return;
+        }
+
         let n = result_buffer.len() * Self::SIZE;
         work_buffer.reserve(n);
         // Safety: `work_buffer` is empty and has capacity at least `n`.
@@ -48,8 +45,46 @@ pub trait SerializeRaw: Sized {
             .for_each(|(mut chunk, val)| {
                 val.serialize_raw(&mut chunk).unwrap();
             });
+    }
+
+    fn serialize_raw_batch(
+        result_buffer: &[Self],
+        work_buffer: &mut AVec,
+        mut file: impl crate::file_vec::WriteAligned,
+    ) -> Result<(), io::Error>
+    where
+        Self: Sync + Send + Sized,
+    {
+        Self::serialize_raw_batch_to_buffer(result_buffer, work_buffer);
+        if work_buffer.is_empty() {
+            return Ok(());
+        }
+
         file.write_all(work_buffer)?;
         Ok(())
+    }
+
+    /// Serializes a terminal batch and pads the physical write for `O_DIRECT`.
+    ///
+    /// The returned byte count excludes padding so the caller can truncate the file back to its
+    /// logical length after the aligned write completes.
+    fn serialize_raw_batch_padded(
+        result_buffer: &[Self],
+        work_buffer: &mut AVec,
+        mut file: impl crate::file_vec::WriteAligned,
+    ) -> Result<usize, io::Error>
+    where
+        Self: Sync + Send + Sized,
+    {
+        Self::serialize_raw_batch_to_buffer(result_buffer, work_buffer);
+        let actual_len = work_buffer.len();
+        if actual_len == 0 {
+            return Ok(0);
+        }
+
+        work_buffer.resize(actual_len.next_multiple_of(PAGE_SIZE), 0);
+        file.write_all(work_buffer)?;
+        Ok(actual_len)
     }
 }
 
@@ -406,6 +441,10 @@ macro_rules! impl_halo2_field {
 impl_halo2_field!(halo2curves::secp256r1::Fp);
 #[cfg(feature = "halo2")]
 impl_halo2_field!(halo2curves::secp256r1::Fq);
+#[cfg(feature = "halo2")]
+impl_halo2_field!(halo2curves::bn256::Fq);
+#[cfg(feature = "halo2")]
+impl_halo2_field!(halo2curves::bn256::Fr);
 
 impl<P: SWCurveConfig> SerializeRaw for SWAffine<P>
 where
@@ -422,22 +461,18 @@ where
         unimplemented!("Use serialize_raw_batch for SWAffine");
     }
 
-    fn serialize_raw_batch(
-        result_buffer: &[Self],
-        work_buffer: &mut AVec,
-        mut file: impl crate::file_vec::WriteAligned,
-    ) -> Result<(), io::Error>
+    fn serialize_raw_batch_to_buffer(result_buffer: &[Self], work_buffer: &mut AVec)
     where
         Self: Sync + Send + Sized,
     {
+        work_buffer.clear();
         if result_buffer.is_empty() {
-            return Ok(());
+            return;
         }
         assert!(
             result_buffer.len() % 2 == 0,
             "SWAffine batch size must be even"
         );
-        work_buffer.clear();
         // We want to write pairs of points, so we reserve twice the size.
         let n = result_buffer.len() * Self::SIZE;
         work_buffer.reserve(n);
@@ -466,8 +501,6 @@ where
                 abc[0] *= b_inv;
                 abc.serialize_raw(&mut &mut buffer[..]).unwrap();
             });
-        file.write_all(work_buffer)?;
-        Ok(())
     }
 }
 
@@ -554,6 +587,7 @@ mod tests {
     use super::*;
     use ark_bls12_381::Fr;
     use ark_std::UniformRand;
+
     fn test_serialize<T: PartialEq + core::fmt::Debug + SerializeRaw + DeserializeRaw>(data: T) {
         let mut serialized = vec![0; T::SIZE];
         data.serialize_raw(&mut &mut serialized[..]).unwrap();
